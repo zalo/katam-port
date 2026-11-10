@@ -636,7 +636,7 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##lh", &s.lightShine, 0.0f, 1.0f, "Shine %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lz", &s.lightHeight, 0.2f, 2.0f, "Light height %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
-        changed |= ImGui::SliderFloat("##ld", &s.lightSprShadow, 0.0f, 0.8f, "Sprite shadows %.2f (0 off)", ImGuiSliderFlags_AlwaysClamp);
+        changed |= ImGui::SliderFloat("##ld", &s.lightSprShadow, 0.0f, 1.0f, "Character shadows %.2f (0 off)", ImGuiSliderFlags_AlwaysClamp);
         ImGui::PopItemWidth();
         ImGui::EndDisabled();
         if (ImGui::Button("Reset lighting")) {
@@ -661,7 +661,7 @@ static int PageDisplay(void)
         }
         ImGui::EndDisabled();
         Hint("Proof of concept: GPU renderer, Rainbow Route rooms only. Shadows are cast by the "
-             "level's solid tiles, and by sprites when Sprite shadows is above 0. Relief gives "
+             "level's solid tiles, and by Kirby and the enemies (Character shadows). Relief gives "
              "sprites a normal map made from their own pixels each frame (after Sprite Normals "
              "by Hugo Duprez, MIT); backgrounds only if you ask for it.");
     }

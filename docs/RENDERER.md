@@ -397,12 +397,16 @@ map texture holds the previous and the current map; `lightMix` blends them),
 so the shadows glide at a fraction of a full build's cost per frame.
 `?normals=4` shows the shadow map.
 
-**Sprite shadows** (Settings > Lighting; off by default -- tried and judged
-to read as smudges rather than shadows; the slider brings them back): a background
-pixel is shaded where a sprite in front of its layer sits towards the light
--- each silhouette dropped 8 px away from the sun (longer when it is low) or
-the room's lights, joined to its sprite and softened, and none where the
-terrain's shade already falls.
+**Character shadows** (Settings > Lighting, 1 = as dark as the level's, 0
+off): the level's own sun shadows with Kirby and the enemies as the
+occluders.  Every lit frame, after the sprite pass, `RunCharShadow` marches
+five rays across the sun's disc (three across each point light's) from each
+2x2 view pixels towards the light through the sprite target, counting a
+blocked ray less the further away its sprite is -- `BuildSun`'s rule -- into
+an R8 texture over the view.  The composite takes the darker of that and the
+level's shadow for background pixels, so the two share one tint and
+darkness and never stack.  (Before them, each silhouette was simply dropped
+a few pixels away from the sun; that read as smudges and is gone.)
 
 Default strength is 2.  **Relief** gives that light something to shade; on
 sprites only, unless *Relief on backgrounds too* is ticked -- at the crate's
@@ -446,7 +450,7 @@ clipped to white.  Sprites therefore use detail strength 2, stay within
 puffed-up Kirby keeps its dome and highlight.  `tools/relief_check/tune.html`
 was used to choose this on real sprites.  Settings > Display >
 Lighting: **Relief** (0 turns it off and skips the passes), **Shine**,
-**Light height**.  `?normals=1` (`KATAM_RELIEF_VIEW=1`) shows the normal maps
+**Light height** (shine 0.1 by default).  `?normals=1` (`KATAM_RELIEF_VIEW=1`) shows the normal maps
 instead of the picture; `?normals=2` and `=3` show the atlas's sprite groups
 and their normals, pixel for pixel.  For comparing looks on one picture:
 `Module._PortWebFreeze(1)` holds the game on its frame and keeps presenting it,

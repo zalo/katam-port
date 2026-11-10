@@ -437,6 +437,7 @@ void PortLightRefreshParams(RlFrame *f)
     f->lightShine = gPortLightParams.shine;
     f->lightHeight = gPortLightParams.height;
     f->lightSprShadow = gPortLightParams.sprShadow;
+    f->lightSoft = gPortLightParams.soft;
     f->lightReliefBg = (u8)gPortLightParams.reliefBg;
     f->lightNrmView = (u8)gPortReliefView;
     f->lightShadow = gPortLightParams.shadow;
@@ -602,6 +603,7 @@ static void Attach(RlFrame *f, int roomBg)
     f->lightAngle = shown;
     f->lightNrmView = (u8)gPortReliefView;
     f->lightSprShadow = gPortLightParams.sprShadow;
+    f->lightSoft = gPortLightParams.soft;
     f->lightReliefBg = (u8)gPortLightParams.reliefBg;
     f->numLights = (u8)sNumLights;
     for (i = 0; i < sNumLights; i++) {

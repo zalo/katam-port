@@ -93,6 +93,7 @@ typedef ptrdiff_t GLintptr;
 #define GL_RG8 0x822B
 #define GL_RG 0x8227
 #define GL_R32UI 0x8236
+#define GL_R8 0x8229
 #define GL_RG32UI 0x823C
 #define GL_RGBA32UI 0x8D70
 #define GL_RG_INTEGER 0x8228
@@ -139,6 +140,7 @@ typedef ptrdiff_t GLintptr;
     X(void, glGetShaderInfoLog, (GLuint, GLsizei, GLsizei *, GLchar *)) \
     X(void, glDeleteShader, (GLuint)) \
     X(GLuint, glCreateProgram, (void)) \
+    X(void, glDeleteProgram, (GLuint)) \
     X(void, glAttachShader, (GLuint, GLuint)) \
     X(void, glLinkProgram, (GLuint)) \
     X(void, glGetProgramiv, (GLuint, GLenum, GLint *)) \
@@ -147,6 +149,7 @@ typedef ptrdiff_t GLintptr;
     X(GLint, glGetUniformLocation, (GLuint, const GLchar *)) \
     X(void, glUniform1i, (GLint, GLint)) \
     X(void, glUniform2i, (GLint, GLint, GLint)) \
+    X(void, glUniform3i, (GLint, GLint, GLint, GLint)) \
     X(void, glUniform4i, (GLint, GLint, GLint, GLint, GLint)) \
     X(void, glUniform1iv, (GLint, GLsizei, const GLint *)) \
     X(void, glUniform2iv, (GLint, GLsizei, const GLint *)) \

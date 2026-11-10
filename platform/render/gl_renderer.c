@@ -128,7 +128,7 @@ static GLint uCSub;
 static GLint uCView, uCContent, uCLayer, uCValid, uCMapGeom, uCMapScroll,
              uCNumHud, uCHudRect, uCHudD;
 static GLint uCLight, uCLightGeom, uCLightK, uCLights, uCNumLights, uCLightP, uCLightMode,
-             uCLightMix, uCSunSide, uCSprSh;
+             uCLightMix, uCSunSide, uCCharShP;
 static GLuint sTexLight;
 static int sLightW, sLightH;
 static u32 sLightGen;
@@ -142,6 +142,10 @@ static const u8 *sLightPtr;
 #define UNIT_IN 9
 #define UNIT_ALB 10
 #define UNIT_ALB_VIEW 11             /* the art, for ?normals=2 only          */
+#define UNIT_CHARSH 12               /* character shadows                     */
+static GLuint sProgCharSh, sTexCharSh, sFboCharSh;
+static GLint uSObjG, uSCell, uSMode, uSSunA, uSNumL, uSLv, uSDisc;
+static int sCharShW, sCharShH, sCharShOn;
 static GLuint sTexObjN;
 static GLuint sProgObjDec, sProgRel[5];
 static GLint uRelSize[5], uRelSprY0[5], uRelGenS[5], uRelGenB[5], uDecView, uDecK, uDecWin;
@@ -285,6 +289,63 @@ static const char *kObjFs =
     "#endif\n"
     "}\n";
 
+/* Character shadows: the level's sun shadows (light.c BuildSun / Visible) with
+ * the sprites as the occluders, every frame, at one texel per CHARSH_CELL view
+ * pixels.  From each texel five rays across the sun's disc (or three across
+ * each point light's) are marched towards it through the sprite pass's target
+ * (opaque, not HUD); a blocked ray counts less the further away its sprite
+ * is, so a shadow is darkest at the feet and its edge widens with distance. */
+#define CHARSH_CELL 2
+static const char *kCharShFs =
+    "precision highp sampler2D;\n"
+    "uniform highp usampler2D uObjT;\n"
+    "uniform ivec3 uObjG;\n"         /* target w, h; k                    */
+    "uniform float uCell;\n"
+    "uniform int uMode;\n"           /* 0 sun, 1 point lights             */
+    "uniform vec2 uSunA;\n"          /* angle left of overhead, disc (rad) */
+    "uniform int uNumL;\n"
+    "uniform vec2 uLv[4];\n"         /* the lights, view px               */
+    "uniform float uDisc;\n"         /* a point light's half size, px     */
+    "out vec4 oS;\n"
+    "#define STEP 2.0\n"
+    "#define NSTEP 32\n"
+    "bool occ(vec2 vp) {\n"
+    "  ivec2 q = ivec2(floor(vp * float(uObjG.z)));\n"
+    "  if (q.x < 0 || q.y < 0 || q.x >= uObjG.x || q.y >= uObjG.y) return false;\n"
+    "  uint b = texelFetch(uObjT, q, 0).b;\n"
+    "  return (b & 8u) != 0u && (b & 16u) == 0u;\n"
+    "}\n"
+    "void main() {\n"
+    "  vec2 p = gl_FragCoord.xy * uCell;\n"
+    "  float sh = 0.0;\n"
+    "  if (uMode == 0) {\n"
+    "    for (int r = 0; r < 5; r++) {\n"
+    "      float a = uSunA.x + uSunA.y * (float(r) / 4.0 - 0.5);\n"
+    "      vec2 d = vec2(-sin(a), -cos(a)) * STEP;\n"       /* towards the sun */
+    "      for (int s = 1; s <= NSTEP; s++)\n"
+    "        if (occ(p + d * float(s))) { sh += 1.0 - 0.9 * float(s) / float(NSTEP); break; }\n"
+    "    }\n"
+    "    sh /= 5.0;\n"
+    "  } else {\n"
+    "    for (int i = 0; i < 4; i++) {\n"
+    "      if (i >= uNumL) break;\n"
+    "      vec2 L = uLv[i] - p;\n"
+    "      float dist = length(L), b = 0.0;\n"
+    "      if (dist < 1.0 || dist > 560.0) continue;\n"
+    "      vec2 nrm = vec2(-L.y, L.x) / dist;\n"
+    "      for (int r = 0; r < 3; r++) {\n"
+    "        vec2 d = normalize(uLv[i] + nrm * uDisc * float(r - 1) - p) * STEP;\n"
+    "        for (int s = 1; s <= NSTEP; s++) {\n"
+    "          if (float(s) * STEP > dist) break;\n"
+    "          if (occ(p + d * float(s))) { b += 1.0 - 0.9 * float(s) / float(NSTEP); break; }\n"
+    "        }\n"
+    "      }\n"
+    "      sh = max(sh, b / 3.0 * clamp((560.0 - dist) / 160.0, 0.0, 1.0));\n"
+    "    }\n"
+    "  }\n"
+    "  oS = vec4(sh, 0.0, 0.0, 1.0);\n"
+    "}\n";
+
 static const char *kCompVs =
     "void main() {\n"
     "  vec2 p = vec2(float((gl_VertexID & 1) * 4) - 1.0, float((gl_VertexID & 2) * 2) - 1.0);\n"
@@ -319,7 +380,9 @@ static const char *kCompFs =
     "uniform int uLightMode;\n"     /* 0 sun, 1 point lights              */
     "uniform float uLightMix;\n"    /* the map's previous (rg) -> current (ba) */
     "uniform float uSunSide;\n"     /* -1 sun on the right .. 1 on the left  */
-    "uniform vec4 uSprSh;\n"        /* sprite shadows: darkness, length px, away from the sun x y */
+    /* Character shadows (RunCharShadow): one texel per CHARSH_CELL view px. */
+    "uniform highp sampler2D uCharSh;\n"
+    "uniform vec4 uCharShP;\n"      /* strength, cell px, texture w, h      */
     /* Relief (relief_glsl.h): normal maps for the lighting.  uDecode.x >= 0:
      * this draw is not the composite but BG uDecode.x's colours into the
      * relief atlas, at atlas = layer coords + uNrmOff[bg].xy. */
@@ -596,6 +659,12 @@ static const char *kCompFs =
     "    if (!hud) {\n"
     "      vec4 slq = texture(uShadow, wp / 8.0 / vec2(uLightGeom.zw));\n"
     "      vec2 sl = mix(slq.rg, slq.ba, uLightMix);\n"
+    /* The characters' shadows join the level's: the darker of the two, so
+     * they take its tint and darkness and never darken twice. */
+    "      if (uCharShP.x > 0.0 && top >= 0 && top < 4) {\n"
+    "        float cs = uCharShP.x * texture(uCharSh, (vec2(c) / 256.0) / (uCharShP.y * uCharShP.zw)).r;\n"
+    "        sl = vec2(max(sl.r, cs), min(sl.g, 1.0 - cs));\n"
+    "      }\n"
     "      if (uNrmView == 4) { oColor = vec4(col * 0.3 + vec3(1.0 - sl.r) * 0.7, 1.0); return; }\n"
     "      float lum = dot(col, vec3(0.30, 0.59, 0.11));\n"
     /* Shade: darker by uLightP.x, bluer by uLightP.z, at full shadow x K. */
@@ -648,46 +717,6 @@ static const char *kCompFs =
     "        }\n"
     "      }\n"
     "      col *= max(mix(vec3(1.0), shadeC, K * sl.r * plane), vec3(0.1));\n"
-    /* Sprite shadows: a background pixel is shaded where a sprite in front
-     * of its layer sits a little way towards the light -- the sprite's
-     * silhouette dropped away from the sun (or the room's lights), softened
-     * over a pixel, and none where the terrain's shade already is. */
-    "      if (uSprSh.x > 0.0 && top >= 0 && top < 4) {\n"
-    "        vec2 away = uSprSh.zw;\n"
-    "        if (uLightMode == 1) {\n"
-    "          vec2 acc = vec2(0.0);\n"
-    "          for (int i = 0; i < 4; i++) {\n"
-    "            if (i >= uNumLights) break;\n"
-    "            vec2 d = wp - uLights[i];\n"
-    "            float att = max(1.0 - length(d) / 560.0, 0.0);\n"
-    "            acc += att * att * d / max(length(d), 1.0);\n"
-    "          }\n"
-    "          away = length(acc) > 1e-4 ? normalize(acc) : vec2(0.0, 1.0);\n"
-    "        }\n"
-    "        float kk = float(uSub.z);\n"
-    "        vec2 perp = vec2(-away.y, away.x);\n"
-    "        ivec2 lim = uView.zw * uSub.z;\n"
-    "        float cov = 0.0;\n"
-    /* Along the drop (half way, three quarters, all of it), so the shadow
-     * stays joined to its sprite; across it, a pixel each side, soft. */
-    "        for (int t = 0; t < 9; t++) {\n"
-    "          float along = t < 3 ? 1.0 : t < 6 ? 0.75 : 0.5;\n"
-    "          float side = float(t - (t / 3) * 3 - 1);\n"
-    "          ivec2 q = h - ivec2(round((away * uSprSh.y * along + perp * side) * kk));\n"
-    "          if (q.x < 0 || q.y < 0 || q.x >= lim.x || q.y >= lim.y) continue;\n"
-    "          uvec4 so = texelFetch(uObj, q, 0);\n"
-    "          if ((so.b & 8u) != 0u && (so.b & 16u) == 0u && int(so.b & 3u) <= lp[top])\n"
-    "            cov = max(cov, side == 0.0 ? 1.0 : 0.5);\n"
-    "        }\n"
-    /* Cast if the sprite itself stands in the light (the map where it is,
-     * not where its shadow lands: that may be inside the ground), and only
-     * partly over the terrain's own shade. */
-    "        vec4 oq = texture(uShadow, (wp - away * uSprSh.y) / 8.0 / vec2(uLightGeom.zw));\n"
-    "        vec2 os = mix(oq.rg, oq.ba, uLightMix);\n"
-    "        float litO = uLightMode == 1 ? clamp(os.g * 2.0, 0.0, 1.0) : 1.0 - os.r;\n"
-    "        vec3 sprC = (1.0 - uSprSh.x) * mix(vec3(1.0), vec3(0.90, 0.95, 1.20), uLightP.z);\n"
-    "        col *= mix(vec3(1.0), sprC, clamp(K * cov * litO * plane * (1.0 - 0.6 * sl.r), 0.0, 1.0));\n"
-    "      }\n"
     /* Warmth where the light arrives.  Sun: fading from the upper left of
      * the view, and less on pale pixels so a white sky is not washed out. */
     "      float wl = K * sl.g * uLightP.y;\n"
@@ -851,6 +880,18 @@ int GlrInit(void *(*getProc)(const char *), int es)
     sProgHud = Link(kHudVs, kHudFs, "hud");
     if (!sProgObj || !sProgComp || !sProgHud)
         return 0;
+    sProgCharSh = Link(kCompVs, kCharShFs, "character shadows");
+    if (sProgCharSh) {
+        G(glUseProgram)(sProgCharSh);
+        G(glUniform1i)(G(glGetUniformLocation)(sProgCharSh, "uObjT"), UNIT_IN);
+        uSObjG = G(glGetUniformLocation)(sProgCharSh, "uObjG");
+        uSCell = G(glGetUniformLocation)(sProgCharSh, "uCell");
+        uSMode = G(glGetUniformLocation)(sProgCharSh, "uMode");
+        uSSunA = G(glGetUniformLocation)(sProgCharSh, "uSunA");
+        uSNumL = G(glGetUniformLocation)(sProgCharSh, "uNumL");
+        uSLv = G(glGetUniformLocation)(sProgCharSh, "uLv");
+        uSDisc = G(glGetUniformLocation)(sProgCharSh, "uDisc");
+    }
     {
         /* Relief: without it the lighting is the flat one; nothing else
          * depends on these. */
@@ -919,7 +960,12 @@ int GlrInit(void *(*getProc)(const char *), int es)
     uCLightMode = G(glGetUniformLocation)(sProgComp, "uLightMode");
     uCLightMix = G(glGetUniformLocation)(sProgComp, "uLightMix");
     uCSunSide = G(glGetUniformLocation)(sProgComp, "uSunSide");
-    uCSprSh = G(glGetUniformLocation)(sProgComp, "uSprSh");
+    uCCharShP = G(glGetUniformLocation)(sProgComp, "uCharShP");
+    {
+        GLint loc = G(glGetUniformLocation)(sProgComp, "uCharSh");
+        if (loc >= 0)
+            G(glUniform1i)(loc, UNIT_CHARSH);
+    }
     uCDecode = G(glGetUniformLocation)(sProgComp, "uDecode");
     uCNrm = G(glGetUniformLocation)(sProgComp, "uNrm");
     uCNrmOff = G(glGetUniformLocation)(sProgComp, "uNrmOff");
@@ -1269,11 +1315,6 @@ static void UploadLight(const RlFrame *f)
     G(glUniform1f)(uCLightMix, f->lightMix);
     G(glUniform1i)(uCNrmView, f->lightNrmView);
     G(glUniform1f)(uCSunSide, f->lightSunSide);
-    {
-        /* Away from the sun, y down; longer as it gets lower. */
-        float a = f->lightAngle * 3.14159265f / 180.0f, sa = sinf(a);
-        G(glUniform4f)(uCSprSh, f->lightSprShadow, 8.0f * (1.0f + 0.8f * fabsf(sa)), sa, cosf(a));
-    }
 }
 
 /* --- relief: normal maps for the lighting (relief_glsl.h) -----------------
@@ -1669,6 +1710,69 @@ static void SetRelief(const RlFrame *f)
     G(glUniform1i)(uCSprY0, sRelSprY0);
 }
 
+/* After the sprite pass, before the composite: the characters' shadows into
+ * an R8 texture over the view (kCharShFs). */
+static void RunCharShadow(const RlFrame *f, int k)
+{
+    int w = (f->viewW + CHARSH_CELL - 1) / CHARSH_CELL, h = (f->viewH + CHARSH_CELL - 1) / CHARSH_CELL;
+    float a = f->lightAngle * 3.14159265f / 180.0f;
+    float lv[8] = { 0 };
+    int i;
+
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_CHARSH);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0);
+    sCharShOn = 0;
+    if (!sProgCharSh || !f->light || !f->world || !(f->lightSprShadow > 0.0f))
+        return;
+    if (!sTexCharSh || w != sCharShW || h != sCharShH) {
+        if (sTexCharSh) {
+            G(glDeleteFramebuffers)(1, &sFboCharSh);
+            G(glDeleteTextures)(1, &sTexCharSh);
+        }
+        G(glActiveTexture)(GL_TEXTURE0 + UNIT_CHARSH);
+        sTexCharSh = MakeTex(GL_R8, GL_RED, GL_UNSIGNED_BYTE, w, h);
+        G(glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        G(glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        G(glBindTexture)(GL_TEXTURE_2D, 0);
+        G(glActiveTexture)(GL_TEXTURE0);
+        G(glGenFramebuffers)(1, &sFboCharSh);
+        G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboCharSh);
+        G(glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sTexCharSh, 0);
+        if (G(glCheckFramebufferStatus)(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+            PortError("[katam-port] gpu: character shadow target incomplete");
+            G(glDeleteProgram)(sProgCharSh);
+            sProgCharSh = 0;
+            return;
+        }
+        sCharShW = w;
+        sCharShH = h;
+    }
+    for (i = 0; i < f->numLights && i < 4; i++) {
+        lv[i * 2 + 0] = f->lights[i][0] - (float)(f->camX + f->viewX) - f->viewSubX / 256.0f;
+        lv[i * 2 + 1] = f->lights[i][1] - (float)(f->camY + f->viewY) - f->viewSubY / 256.0f;
+    }
+    G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboCharSh);
+    G(glViewport)(0, 0, w, h);
+    G(glUseProgram)(sProgCharSh);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_IN);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexObj);
+    G(glUniform3i)(uSObjG, f->viewW * k, f->viewH * k, k);
+    G(glUniform1f)(uSCell, (float)CHARSH_CELL);
+    G(glUniform1i)(uSMode, f->lightMode);
+    G(glUniform2f)(uSSunA, a, (1.0f + 16.0f * f->lightSoft) * 3.14159265f / 180.0f);
+    G(glUniform1i)(uSNumL, f->numLights);
+    G(glUniform2fv)(uSLv, 4, lv);
+    G(glUniform1f)(uSDisc, 4.0f + 56.0f * f->lightSoft);
+    G(glBindVertexArray)(sVaoEmpty);
+    G(glDrawArrays)(GL_TRIANGLES, 0, 3);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_CHARSH);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexCharSh);
+    G(glActiveTexture)(GL_TEXTURE0);
+    sCharShOn = 1;
+}
+
 void GlrDraw(const RlFrame *f)
 {
     GlrDrawScaled(f, 1);
@@ -1781,6 +1885,7 @@ void GlrDrawScaled(const RlFrame *f, int k)
         EnsureHudTargets();
         DrawSprites(f, sFboObjHud, 0, f->numSprites, 0, SPR_HUD, HUD_ATLAS_W, HUD_ATLAS_H, 1);
     }
+    RunCharShadow(f, k);
 
     /* Pass 2: composite. */
     G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboComp);
@@ -1796,6 +1901,8 @@ void GlrDrawScaled(const RlFrame *f, int k)
     G(glBindTexture)(GL_TEXTURE_2D, sTexObjN);
     G(glActiveTexture)(GL_TEXTURE0);
     BindReliefView(f);
+    G(glUniform4f)(uCCharShP, sCharShOn ? f->lightSprShadow : 0.0f, (float)CHARSH_CELL,
+                   (float)sCharShW, (float)sCharShH);
     G(glBindVertexArray)(sVaoEmpty);
     G(glDrawArrays)(GL_TRIANGLES, 0, 3);
 

@@ -97,7 +97,7 @@ void PortSettingsClamp(PortSettings *s)
     s->lightHeight = ClampF(s->lightHeight, 0.2f, 2.0f);
     s->lightSunAnim = !!s->lightSunAnim;
     s->lightSunSpeed = ClampF(s->lightSunSpeed, 0.5f, 30.0f);
-    s->lightSprShadow = ClampF(s->lightSprShadow, 0.0f, 0.8f);
+    s->lightSprShadow = ClampF(s->lightSprShadow, 0.0f, 1.0f);
     s->lightReliefBg = !!s->lightReliefBg;
 }
 
@@ -150,14 +150,17 @@ void PortSettingsParse(PortSettings *s, const char *text)
                 FLT_KEY("lightcool", lightCool)
                 FLT_KEY("lightglow", lightGlow)
                 FLT_KEY("lightrelief", lightRelief)
-                FLT_KEY("lightshine", lightShine)
+                /* "lightshine2": the default went from 0.35 to 0.1, and the
+                 * old key was saved by anyone who touched any setting. */
+                FLT_KEY("lightshine2", lightShine)
                 FLT_KEY("lightheight", lightHeight)
                 INT_KEY("lightsunanim", lightSunAnim)
                 FLT_KEY("lightsunspeed", lightSunSpeed)
-                /* "lightsprshadow2": the default changed to off, and the old
-                 * key was saved as 0.4/0.5 by anyone who touched any
-                 * setting, so it is ignored -- as smoothcam2 above. */
-                FLT_KEY("lightsprshadow2", lightSprShadow)
+                /* "lightcharshadow": the raycast character shadows.  The
+                 * drop shadows before them were "lightsprshadow"/"...2";
+                 * a value saved for those means something else, so it is
+                 * ignored -- as smoothcam2 above. */
+                FLT_KEY("lightcharshadow", lightSprShadow)
                 INT_KEY("lightreliefbg", lightReliefBg)
 #undef INT_KEY
 #undef FLT_KEY
@@ -185,8 +188,8 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       "light=%d\nlightmode=%d\nlightk=%.3f\nlightshadow=%.3f\n"
                       "lightsoft=%.3f\nlightangle=%.1f\nlightwarm=%.3f\n"
                       "lightcool=%.3f\nlightglow=%.3f\nlightrelief=%.3f\n"
-                      "lightshine=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
-                      "lightsunspeed=%.2f\nlightsprshadow2=%.3f\nlightreliefbg=%d\n",
+                      "lightshine2=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
+                      "lightsunspeed=%.2f\nlightcharshadow=%.3f\nlightreliefbg=%d\n",
                       s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
