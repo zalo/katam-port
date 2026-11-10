@@ -400,11 +400,38 @@ starlight and violet crystals (Candy Constellation), mirror light and magenta
 crystals (Dimension Mirror).  The renderer takes the colours from the frame
 (`envLift`, `envShade`, `envHalo`, `envSpec`).
 
-Settings > Lighting *Auto* (the default) decides per room: the area's sun map
-is built and, if it lights under 45% of the room's open air, the room is lit
-by its point lights instead -- placed in the open air of each ~480x360 px of
-the room, the nearest 8 sent each frame.  Indoors the shade is the light that
-does not arrive (dim far from every light), not light blocked.  *Sun* and
+Settings > Lighting *Auto* (the default) decides per room: indoors or out as
+people judged each room from its picture (`light_rooms.c`, 182 rooms), and for
+a room not judged, the area's sun map is built and if it lights under 45% of
+the room's open air the room is lit as indoors.  The world map screens are
+not lit.
+
+**Lamps** are found in the background art (light.c `FindLanterns`): every
+layer that moves with the room and whose whole map the frame carries is read
+tile by tile from VRAM and the palette, once the palette has held still for
+12 frames after the room's fade-in.  A tile with a quarter of its pixels near
+full brightness is a lamp's core (a brick's highlight is not); core tiles
+touching, corners included (a candelabra's bulbs), make a lamp if the group
+is at most 40 tiles in an 8-tile box, has at least 40 bright pixels, and the
+two tiles round it are clearly darker -- which leaves out the sky, snow,
+white walls and specks -- and it hangs in open air (not on solid cells) and
+is not a tile the room repeats more than 24 times (blocks, logs, ledges).
+
+How well that works was measured, not guessed: every room was captured with
+the lamps ringed (`?normals=5`) and Sonnet agents reviewed the pictures.  The
+first cut put 24 rings on real lamps and 385 on bright terrain; the two
+terrain tests above cut the false ones to 22 against 7 real, nearly all in
+water and ice.  Real lamp art is rare in this game (Moonlight Mansion's wall
+lamps, a few sconces and orbs), so lamps are used only in the rooms where
+reviewers confirmed them (`kLampRooms`); every other indoor room is lit
+softly, without point lights.  Not lit as lamps yet: lava and stained glass
+(large glowing areas, which the size test leaves out on purpose).  The light goes at the bright pixels' centre in their
+colour (a white lamp, warm white), re-placed every frame from its layer's
+scroll; the nearest 8 go to the renderer.  The composite lights them without
+walls in the way: lift and glow in each lamp's colour, falling off over
+200 px, and away from them only *Indoor shade* (0.12 by default) of the
+shade -- an indoor room is not a cave to be dark in.  `?normals=5` rings each
+lamp in magenta (and logs what was found, per room).  *Sun* and
 *Point lights* force one everywhere (the sun angle slider applies with Sun).
 Saved lighting settings from before `LIGHT_SETTINGS_VER` 3 are reset to the
 defaults once.

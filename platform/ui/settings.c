@@ -70,6 +70,7 @@ void LightDefaults(PortSettings *s)
         s->lightCharReach = kL.charReach;
         s->lightCharDepth = kL.charDepth;
         s->lightReliefOn = kL.reliefOn;
+        s->lightIndoor = kL.indoorShade;
     }
 }
 
@@ -117,6 +118,7 @@ void PortSettingsClamp(PortSettings *s)
     s->lightCharReach = ClampF(s->lightCharReach, 16.0f, 160.0f);
     s->lightCharDepth = ClampF(s->lightCharDepth, 0.0f, 48.0f);
     s->lightReliefOn = !!s->lightReliefOn;
+    s->lightIndoor = ClampF(s->lightIndoor, 0.0f, 1.0f);
 }
 
 void PortSettingsParse(PortSettings *s, const char *text)
@@ -185,6 +187,7 @@ void PortSettingsParse(PortSettings *s, const char *text)
                 FLT_KEY("lightcharreach", lightCharReach)
                 FLT_KEY("lightchardepth", lightCharDepth)
                 INT_KEY("lightreliefon", lightReliefOn)
+                FLT_KEY("lightindoor", lightIndoor)
                 else if (strcmp(key, "lightver") == 0) lightVer = (int)strtol(val, NULL, 0);
 #undef INT_KEY
 #undef FLT_KEY
@@ -219,7 +222,7 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       "lightcool=%.3f\nlightglow=%.3f\nlightrelief=%.3f\n"
                       "lightshine2=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
                       "lightsunspeed=%.2f\nlightcharshadow=%.3f\nlightreliefbg=%d\n"
-                      "lightdepth=%.1f\nlightcharreach=%.1f\nlightchardepth=%.1f\nlightreliefon=%d\n",
+                      "lightdepth=%.1f\nlightcharreach=%.1f\nlightchardepth=%.1f\nlightreliefon=%d\nlightindoor=%.3f\n",
                       LIGHT_SETTINGS_VER, s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
@@ -228,7 +231,7 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       (double)s->lightHeight, s->lightSunAnim, (double)s->lightSunSpeed,
                       (double)s->lightSprShadow, s->lightReliefBg,
                       (double)s->lightDepth, (double)s->lightCharReach,
-                      (double)s->lightCharDepth, s->lightReliefOn);
+                      (double)s->lightCharDepth, s->lightReliefOn, (double)s->lightIndoor);
     return n < size ? n : size - 1;
 }
 

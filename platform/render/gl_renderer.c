@@ -128,7 +128,7 @@ static GLint uCSub;
 static GLint uCView, uCContent, uCLayer, uCValid, uCMapGeom, uCMapScroll,
              uCNumHud, uCHudRect, uCHudD;
 static GLint uCLight, uCLightGeom, uCLightK, uCLights, uCNumLights, uCLightP, uCLightMode,
-             uCLightMix, uCSunSide, uCCharShP;
+             uCLightMix, uCSunSide, uCCharShP, uCLightCol, uCLamp;
 static GLint uCEnvLift, uCEnvShade, uCEnvHalo, uCEnvSpec;
 static GLuint sTexLight;
 static int sLightW, sLightH;
@@ -413,6 +413,8 @@ static const char *kCompFs =
     "uniform float uLightMix;\n"    /* the map's previous (rg) -> current (ba) */
     "uniform float uSunSide;\n"     /* -1 sun on the right .. 1 on the left  */
     /* The environment's colours (RlFrame.env*, light.c, per area). */
+    "uniform vec3 uLightCol[" NLIGHTS_STR "];\n" /* each lamp's colour (point-lit rooms) */
+    "uniform vec2 uLamp;\n"         /* lamp range px, indoor shade          */
     "uniform vec3 uEnvLift;\n"     /* lit areas: x warmth                 */
     "uniform vec3 uEnvShade;\n"    /* shade's tint at full coolness       */
     "uniform vec3 uEnvHalo;\n"     /* the point lights' glow              */
@@ -696,6 +698,23 @@ static const char *kCompFs =
     "    if (!hud) {\n"
     "      vec4 slq = texture(uShadow, wp / 8.0 / vec2(uLightGeom.zw));\n"
     "      vec2 sl = mix(slq.rg, slq.ba, uLightMix);\n"
+    /* Point-lit (indoors): the room's lamps, where the art draws them, light
+     * falling off with distance in each one's colour, no walls in the way;
+     * away from them only Indoor shade of the shade. */
+    "      vec3 lampC = uEnvLift;\n"
+    "      if (uLightMode == 1) {\n"
+    "        float la = 0.0;\n"
+    "        vec3 lc = vec3(0.0);\n"
+    "        for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
+    "          if (i >= uNumLights) break;\n"
+    "          float a = max(1.0 - length(uLights[i] - wp) / uLamp.x, 0.0);\n"
+    "          la += a * a;\n"
+    "          lc += a * a * uLightCol[i];\n"
+    "        }\n"
+    "        if (la > 1e-4) lampC = lc / la * 0.3 - 0.06;\n"
+    "        la = min(la, 1.0);\n"
+    "        sl = vec2(uLamp.y * clamp(1.0 - la * 1.6, 0.0, 1.0), la);\n"
+    "      }\n"
     /* The characters' shadows join the level's: the darker of the two, so
      * they take its tint and darkness and never darken twice. */
     "      if (uCharShP.x > 0.0 && top >= 0 && top < 4) {\n"
@@ -718,7 +737,7 @@ static const char *kCompFs =
     "        vec4 nt = vec4(0.0);\n"
     "        if (top == 4) nt = texelFetch(uObjN, h, 0);\n"
     "        else if (top >= 0 && uNrmOff[top].z != 0) nt = texelFetch(uNrmAtlas, lxy[top] + uNrmOff[top].xy, 0);\n"
-    "        if (uNrmView != 0) { oColor = vec4(nt.a > 0.5 ? nt.rgb : vec3(0.15, 0.15, 0.3), 1.0); return; }\n"
+    "        if (uNrmView == 1) { oColor = vec4(nt.a > 0.5 ? nt.rgb : vec3(0.15, 0.15, 0.3), 1.0); return; }\n"
     "        if (nt.a > 0.5) {\n"
     "          vec3 N = normalize(nt.xyz * 2.0 - 1.0), Ld = uSunDir;\n"
     "          float lit = 1.0 - sl.r;\n"
@@ -727,7 +746,7 @@ static const char *kCompFs =
     "            for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
     "              if (i >= uNumLights) break;\n"
     "              vec2 d = uLights[i] - wp;\n"
-    "              float att = max(1.0 - length(d) / 560.0, 0.0);\n"
+    "              float att = max(1.0 - length(d) / uLamp.x, 0.0);\n"
     "              acc += att * att * normalize(vec3(d.x, -d.y, uRelief.w));\n"
     "            }\n"
     "            Ld = length(acc) > 1e-4 ? normalize(acc) : vec3(0.0, 0.0, 1.0);\n"
@@ -762,15 +781,23 @@ static const char *kCompFs =
     "        float hx = 0.5 + (sp.x - 0.5) * uSunSide;\n"
     "        wl *= (0.35 + 0.65 * (1.0 - 0.5 * (hx + sp.y))) * (1.0 - 0.6 * lum);\n"
     "      }\n"
-    "      col *= vec3(1.0) + wl * uEnvLift;\n"
+    "      col *= vec3(1.0) + wl * lampC;\n"
     "      if (uLightMode == 1) {\n"
-    "        float halo = 0.0;\n"
+    "        vec3 halo = vec3(0.0);\n"
     "        for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
     "          if (i >= uNumLights) break;\n"
     "          float d = length(wp - uLights[i]);\n"
-    "          halo += 0.7 * exp(-d / 14.0) + 0.10 * exp(-d / 64.0);\n"
+    "          halo += (0.22 * exp(-d / 10.0) + 0.05 * exp(-d / 48.0)) * uLightCol[i];\n"
     "        }\n"
-    "        col += K * uLightP.w * halo * uEnvHalo;\n"
+    "        col += K * uLightP.w * halo;\n"
+    /* ?normals=5: each lamp ringed in magenta, its colour at the centre. */
+    "        if (uNrmView == 5)\n"
+    "          for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
+    "            if (i >= uNumLights) break;\n"
+    "            float d = length(wp - uLights[i]);\n"
+    "            if (abs(d - 8.0) < 1.0) col = vec3(1.0, 0.0, 1.0);\n"
+    "            else if (d < 3.0) col = uLightCol[i];\n"
+    "          }\n"
     "      }\n"
     "    }\n"
     "    oColor = vec4(min(col, vec3(1.0)), 1.0);\n"
@@ -1007,6 +1034,8 @@ int GlrInit(void *(*getProc)(const char *), int es)
     uCEnvHalo = G(glGetUniformLocation)(sProgComp, "uEnvHalo");
     uCEnvSpec = G(glGetUniformLocation)(sProgComp, "uEnvSpec");
     uCCharShP = G(glGetUniformLocation)(sProgComp, "uCharShP");
+    uCLightCol = G(glGetUniformLocation)(sProgComp, "uLightCol");
+    uCLamp = G(glGetUniformLocation)(sProgComp, "uLamp");
     {
         GLint loc = G(glGetUniformLocation)(sProgComp, "uCharSh");
         if (loc >= 0)
@@ -1370,6 +1399,8 @@ static void UploadLight(const RlFrame *f)
     G(glUniform4f)(uCLightP, f->lightShadow, f->lightWarm, f->lightCool, f->lightGlow);
     G(glUniform1i)(uCLightMode, f->lightMode);
     G(glUniform1f)(uCLightMix, f->lightMix);
+    G(glUniform3fv)(uCLightCol, RL_MAX_LIGHTS, &f->lightCol[0][0]);
+    G(glUniform2f)(uCLamp, f->lampRange > 0.0f ? f->lampRange : 200.0f, f->lightIndoor);
     G(glUniform1i)(uCNrmView, f->lightNrmView);
     G(glUniform1f)(uCSunSide, f->lightSunSide);
     env[0] = f->envLift;

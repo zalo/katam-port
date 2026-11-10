@@ -67,7 +67,7 @@ EM_JS(int, PortWebLightingParam, (void), {
  * 4: the shadow map. */
 EM_JS(int, PortWebNormalsParam, (void), {
     try { var n = parseInt(new URLSearchParams(location.search).get('normals') || '0', 10);
-          return n >= 1 && n <= 4 ? n : 0; }
+          return n >= 1 && n <= 5 ? n : 0; }
     catch (e) { return 0; }
 });
 

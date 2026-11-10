@@ -200,6 +200,10 @@ typedef struct RlFrame {
      * highlights are envSpec.  Rainbow Route's: (0.45 0.25 -0.08),
      * (0.90 0.95 1.20), (0.55 0.42 0.20), (1.0 0.92 0.75). */
     float envLift[3], envShade[3], envHalo[3], envSpec[3];
+    /* Point-lit rooms: each lamp's colour (lights[] are where the art draws
+     * it), how far a lamp lights (px), and how dark it is away from them. */
+    float lightCol[RL_MAX_LIGHTS][3];
+    float lampRange, lightIndoor;
     float lightSunSide;      /* -1 sun on the right .. 1 on the left (35 deg) */
     float lightSprShadow;    /* characters' shadows: strength, 0 none         */
     float lightSoft;         /* penumbra, 0..1 (PortLightParams.soft)         */
@@ -273,13 +277,15 @@ typedef struct PortLightParams {
     float charReach;    /* how far a character's shadow reaches, px 16..160  */
     float charDepth;    /* ... and into solid ground, px 0..48              */
     int reliefOn;       /* normal maps at all (relief, shine): 0 none       */
+    float indoorShade;  /* point-lit rooms: shade away from the lamps, 0..1 */
 } PortLightParams;
 #define PORT_LIGHT_PARAMS_DEFAULT { LIGHT_REQ_AUTO, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
-                                    0.5f, 0.10f, 0.8f, 0, 5.0f, 1.0f, 0, 3.0f, 16.0f, 3.0f, 1 }
+                                    0.5f, 0.10f, 0.8f, 0, 5.0f, 1.0f, 0, 3.0f, 16.0f, 3.0f, 1, 0.12f }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
 /* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);
- * 2, 3: the relief atlas's sprite art, sprite normals; 4: the shadow map. */
+ * 2, 3: the relief atlas's sprite art, sprite normals; 4: the shadow map;
+ * 5: the picture with each lamp marked (and the lamps found, logged). */
 extern int gPortReliefView;
 extern double gPortLightBuildMs;
 void PortLightResolve(void);
@@ -288,6 +294,12 @@ void PortLightRefreshParams(RlFrame *f);
 /* The area a room belongs to (enum AreaId, game/include/pause_area_map.h),
  * or -1 if the area map does not list it (platform/render/light_rooms.c). */
 int PortLightRoomArea(u16 room);
+/* 1 indoors, 0 outdoors, -1 not judged (light_rooms.c); 1 for the world
+ * map screens, which are not lit. */
+int PortLightRoomIndoor(u16 room);
+int PortLightRoomUnlit(u16 room);
+/* 1: the room's lamps, found in its art, are used (light_rooms.c). */
+int PortLightRoomLamps(u16 room);
 
 /* The last frame built, for showing on a display finer than the game's pixel
  * grid and faster than its 59.73 Hz.  Presentation only: the result is a

@@ -13,8 +13,11 @@
  * one or the other everywhere.
  *
  * The sun: parallel rays from beyond the top of the room at an angle from
- * overhead (left positive).  Point lights: spread over the room's open air,
- * one per ~480x360 px.  Per room, from the room's own collision grid
+ * overhead (left positive).  Point lights: the lamps the background art
+ * draws (FindLanterns), in their own colours, lit by the composite without
+ * walls in the way and with only a light shade between them (Indoor shade):
+ * an indoor room is not a cave to be dark in.  Per room, from the room's own
+ * collision grid
  * (gUnk_02024ED0[slot], one byte per 16x16 cell, an index into
  * gCollisionAttributes, at most 1950 cells), a map of one texel per 8x8
  * world pixels is worked out by marching five rays from each texel across
@@ -151,13 +154,9 @@ static const LightEnv *EnvFor(u16 room)
 
 /* The tunables are gPortLightParams (the settings menu's Lighting section;
  * natively KATAM_LIGHTING_STRENGTH / _MODE override strength and mode). */
-#define LIGHT_RANGE 560.0f                   /* px a light reaches          */
-#define LIGHT_REGION_W 480                   /* px a room light looks after */
-#define LIGHT_REGION_H 360
-#define LIGHT_ROOM_MAX 16                    /* a room's lights, at most    */
 #define OPEN_LIT 0.45f                       /* sunlit share of the air: outdoors */
-#define CAVE_GAIN 1.6f                       /* point-lit: light -> no shade */
-#define CAVE_DARK 0.85f                      /* point-lit: shade far from all lights */
+#define LANTERN_MAX 24                       /* a room's lamps, at most     */
+#define LAMP_RANGE 200.0f                    /* px a lamp lights            */
 #define SUN_REACH 320.0f                     /* px a sun ray is followed    */
 #define LIGHT_RAYS 5
 #define LIGHT_STEP 6.0f                      /* march step, px              */
@@ -179,8 +178,20 @@ static float sBuiltSoft = -1.0f, sBuiltAngle = -1.0f, sBuiltDepth = -1.0f;
 static const u8 *sGrid;          /* the room's grid the map was built from */
 static u32 sOccGen;              /* bumps when sOcc is worked out again     */
 static double sLastBuild;
-static float sLights[LIGHT_ROOM_MAX][2];
-static int sNumLights;
+/* The room's lamps (FindLanterns): where the background art draws a
+ * lantern, a lamp, a glowing crystal, on which layer, at its map pixel, in
+ * its colour.  Placed on the screen again every frame from the layer's own
+ * scroll, so a lamp on a parallax layer keeps its light. */
+typedef struct Lantern {
+    u8 bg;
+    s32 mx, my;
+    float col[3];
+} Lantern;
+static Lantern sLant[LANTERN_MAX];
+static int sNumLant;
+static u16 sLantRoom = 0xFFFF;
+static int sLantTries;
+static u32 sLantPal;
 static int sBuiltReq = -1;       /* the mode asked for (LIGHT_REQ_*)        */
 static const LightEnv *sEnv = &kEnvs[1];
 
@@ -216,55 +227,6 @@ static int Occ(s32 x, s32 y, s32 cw, s32 ch)
     return o == 1 || (o == 2 && (y & 15) < 4);
 }
 
-/* Where the lights hang: the room cut into regions of about
- * LIGHT_REGION_W x LIGHT_REGION_H px, and in each with enough open air a
- * light at its most open cell (most air in a 9x9-cell window, the upper
- * part preferred) -- a cave's chambers, an outdoor room's sky.  Anchored to
- * the room, so shadows do not swim. */
-static void PlaceLights(s32 cw, s32 ch)
-{
-    int nx = (cw * 16 + LIGHT_REGION_W - 1) / LIGHT_REGION_W;
-    int ny = (ch * 16 + LIGHT_REGION_H - 1) / LIGHT_REGION_H;
-    int rx, ry;
-
-    sNumLights = 0;
-    if (nx < 1) nx = 1;
-    if (ny < 1) ny = 1;
-    for (ry = 0; ry < ny; ry++)
-        for (rx = 0; rx < nx && sNumLights < LIGHT_ROOM_MAX; rx++) {
-            s32 x0 = rx * cw / nx, x1 = (rx + 1) * cw / nx;
-            s32 y0 = ry * ch / ny, y1 = (ry + 1) * ch / ny;
-            s32 cx, cy, bx = -1, by = -1;
-            float best = -1e9f;
-
-            for (cy = y0; cy < y1; cy++)
-                for (cx = x0; cx < x1; cx++) {
-                    int air = 0, x, y;
-                    float score;
-                    if (sOcc[cy * cw + cx] != 0)
-                        continue;
-                    for (y = cy - 4; y <= cy + 4; y++)
-                        for (x = cx - 4; x <= cx + 4; x++)
-                            if (x >= 0 && y >= 0 && x < cw && y < ch && sOcc[y * cw + x] == 0)
-                                air++;
-                    if (air < 30)
-                        continue;       /* too enclosed to hang a light     */
-                    score = air - 0.4f * (float)(cy - y0)
-                          - 0.2f * fabsf((float)cx - 0.5f * (float)(x0 + x1));
-                    if (score > best) {
-                        best = score;
-                        bx = cx;
-                        by = cy;
-                    }
-                }
-            if (bx < 0)
-                continue;               /* (nearly) solid: no light here   */
-            sLights[sNumLights][0] = bx * 16 + 8;
-            sLights[sNumLights][1] = by * 16 + 8;
-            sNumLights++;
-        }
-}
-
 /* The collision attribute of a grid byte as the march sees it. */
 static u8 CellOcc(u8 g)
 {
@@ -286,46 +248,6 @@ static int DepthSteps(void)
 {
     float d = gPortLightParams.depth;
     return d <= 0.0f ? 0 : (int)(d / LIGHT_STEP + 0.5f);
-}
-
-/* 0..1: how much of light (lx,ly)'s disc the point sees. */
-static float Visible(float px0, float py0, float lx0, float ly0, float d0,
-                     s32 cw, s32 ch)
-{
-    int depth = DepthSteps();
-    float nx = -(ly0 - py0) / d0, ny = (lx0 - px0) / d0, lit = 0.0f;
-    int r;
-
-    /* Rays to points across the light's disc, perpendicular to the line to
-     * it: the penumbra widens with distance from the occluder, as an area
-     * light's does. */
-    for (r = 0; r < LIGHT_RAYS; r++) {
-        float o = (4.0f + 56.0f * gPortLightParams.soft)
-                  * ((float)r / (LIGHT_RAYS - 1) * 2.0f - 1.0f);
-        float lx = lx0 + nx * o, ly = ly0 + ny * o;
-        float dx = lx - px0, dy = ly - py0, d = sqrtf(dx * dx + dy * dy);
-        int n = (int)(d / LIGHT_STEP), s, start = 0, blocked = 0;
-        float sx, sy;
-
-        if (d < 1.0f) {
-            lit += 1.0f;
-            continue;
-        }
-        sx = dx / d * LIGHT_STEP;
-        sy = dy / d * LIGHT_STEP;
-        /* Inside the ground: start where the ray leaves it (within
-         * DepthSteps), so the face of a lit block is lit that far in. */
-        while (start < n && start < depth
-               && Occ((s32)(px0 + sx * start), (s32)(py0 + sy * start), cw, ch))
-            start++;
-        for (s = start + 1; s < n; s++)
-            if (Occ((s32)(px0 + sx * s), (s32)(py0 + sy * s), cw, ch)) {
-                blocked = 1;
-                break;
-            }
-        lit += blocked ? 0.0f : 1.0f;
-    }
-    return lit / LIGHT_RAYS;
 }
 
 /* The sun: parallel rays from the upper left, beyond the top of the room.
@@ -378,61 +300,264 @@ static void BuildSun(s32 cw, s32 ch, s32 mw, float angle, s32 ty0, s32 ty1)
     }
 }
 
-static void BuildPoints(s32 cw, s32 ch, s32 mw, s32 mh)
+/* Finding the lamps in the background art.
+ *
+ * Every world layer whose whole map the frame carries (the room layer and
+ * the streamed pictures behind it) is read tile by tile from VRAM and the
+ * palette, as the composite would draw it.  A tile is a lamp's core with a
+ * quarter of its pixels near full brightness (a brick's highlight is not).
+ * Core tiles that touch make a candidate; a lamp is one at most LANT_TILES
+ * tiles in a LANT_SPAN-tile box, with at least LANT_HOT_MIN bright pixels,
+ * whose surroundings are clearly darker and mostly not core -- which leaves
+ * out the sky, clouds, snow and white walls, and specks.  Its light is placed at the hot
+ * pixels' centre and takes their colour. */
+#define LANT_HOT_LUMA 24                     /* of 31: a hot pixel           */
+#define LANT_HOT_PIX 16                      /* of 64: a lamp's core tile    */
+#define LANT_HOT_MIN 40                      /* hot pixels: a lamp, not a speck */
+#define LANT_TILES 40
+#define LANT_SPAN 8
+#define LANT_CONTRAST 7                      /* ring luma below the lamp's   */
+#define LANT_REPEAT 24                       /* a core tile used more: terrain */
+#define LANT_MAP_MAX (272 * 208)
+
+typedef struct TileStat {
+    u8 hot, lum;
+    u16 r, g, b;                             /* sums over the hot pixels      */
+} TileStat;
+
+static int Luma5(u16 c)
 {
-    s32 tx, ty;
-
-    PlaceLights(cw, ch);
-
-    /* Per texel: shadow = how much light is blocked (fading out towards
-     * the edge of each light's reach), light = how much arrives, falling
-     * off with distance.  Daylight stays neutral away from both. */
-    for (ty = 0; ty < mh; ty++) {
-        for (tx = 0; tx < mw; tx++) {
-            float px0 = tx * LIGHT_CELL + LIGHT_CELL * 0.5f;
-            float py0 = ty * LIGHT_CELL + LIGHT_CELL * 0.5f;
-            float sh = 0.0f, li = 0.0f;
-            int l;
-
-            for (l = 0; l < sNumLights; l++) {
-                float dx = sLights[l][0] - px0, dy = sLights[l][1] - py0;
-                float d = sqrtf(dx * dx + dy * dy), v, fade, att;
-                if (d >= LIGHT_RANGE)
-                    continue;
-                v = d < 1.0f ? 1.0f : Visible(px0, py0, sLights[l][0], sLights[l][1], d, cw, ch);
-                fade = (LIGHT_RANGE - d) / 160.0f;
-                if (fade > 1.0f)
-                    fade = 1.0f;
-                att = 1.0f - d / LIGHT_RANGE;
-                sh += (1.0f - v) * fade;
-                li += v * att * att;
-            }
-            /* Indoors the dark is where the light does not reach: shade by
-             * the light missing (blocked or too far), dim but not black
-             * away from every light. */
-            (void)sh;
-            li = li > 1.0f ? 1.0f : li;
-            sh = 1.0f - li * CAVE_GAIN;
-            sTmp[(ty * mw + tx) * 2] = (sh < 0.0f ? 0.0f : sh) * CAVE_DARK;
-            sTmp[(ty * mw + tx) * 2 + 1] = li;
-        }
-    }
+    return ((c & 31) * 77 + ((c >> 5) & 31) * 150 + ((c >> 10) & 31) * 29) >> 8;
 }
 
-/* Sun or point lights for this room: what was asked for, or (Auto) the
- * sun if it would light enough of the room's open air -- the room's sun map
+static void StatTile(const RlFrame *f, u32 charBase, int is256, u16 e, TileStat *t)
+{
+    int tile = e & 0x3FF, bank = (e >> 12) & 15, px, lumSum = 0, n = 0;
+
+    memset(t, 0, sizeof(*t));
+    for (px = 0; px < 64; px++) {
+        u32 off;
+        int idx;
+        u16 c;
+        if (is256) {
+            off = charBase + (u32)tile * 64 + (u32)px;
+            if (off >= 0x10000) return;
+            idx = f->vram[off];
+            if (idx == 0) continue;
+            c = f->palette[idx];
+        } else {
+            off = charBase + (u32)tile * 32 + (u32)(px >> 1);
+            if (off >= 0x10000) return;
+            idx = (px & 1) ? (f->vram[off] >> 4) : (f->vram[off] & 15);
+            if (idx == 0) continue;
+            c = f->palette[(bank * 16 + idx) & 255];
+        }
+        n++;
+        lumSum += Luma5(c);
+        if (Luma5(c) >= LANT_HOT_LUMA) {
+            t->hot++;
+            t->r += c & 31;
+            t->g += (c >> 5) & 31;
+            t->b += (c >> 10) & 31;
+        }
+    }
+    t->lum = (u8)(n ? lumSum / n : 0);
+}
+
+typedef struct LampCand {
+    s32 x, y;                                /* grid pixels                   */
+    float col[3];
+} LampCand;
+
+/* Is world pixel (x, y) solid in the room's collision (light.c's sOcc)? */
+static int SolidAt(s32 x, s32 y)
+{
+    s32 cx = x >> 4, cy = y >> 4;
+    if (x < 0 || y < 0 || cx >= sCw || cy >= sCh)
+        return 0;
+    return sOcc[cy * sCw + cx] != 0;
+}
+
+/* The lamps in a grid of W x H tile entries (e[y * W + x], 0 = empty) whose
+ * pixel (0, 0) is world pixel (wox, woy).  Two more tests than looks: a lamp
+ * is decoration -- it hangs in the room's open air, not on its solid cells
+ * -- and it is not a tile the room repeats LANT_REPEAT times over (blocks,
+ * logs, ledges, ice).  People reviewing 182 rooms found nearly every
+ * candidate those leave out on solid terrain. */
+static int GridLamps(const RlFrame *f, u32 charBase, int is256, const u16 *e, s32 W, s32 H,
+                     s32 wox, s32 woy, LampCand *out, int max)
+{
+    static TileStat st[LANT_MAP_MAX];
+    static u8 seen[LANT_MAP_MAX];
+    static s32 queue[LANT_MAP_MAX];
+    static u16 rep[0x10000];
+    s32 i;
+    int n = 0;
+
+    if (W <= 0 || H <= 0 || W * H > LANT_MAP_MAX)
+        return 0;
+    memset(rep, 0, sizeof(rep));
+    for (i = 0; i < W * H; i++) {
+        if (e[i])
+            StatTile(f, charBase, is256, e[i], &st[i]);
+        else
+            memset(&st[i], 0, sizeof(st[i]));
+        seen[i] = 0;
+        if (st[i].hot >= LANT_HOT_PIX && rep[e[i] & 0xF3FF] < 0xFFFF)
+            rep[e[i] & 0xF3FF]++;
+    }
+    for (i = 0; i < W * H && n < max; i++) {
+        s32 head = 0, tail = 0, x0, y0, x1, y1, k, ringN = 0, ringHot = 0, solid = 0, most = 0;
+        long ringLum = 0, hot = 0, hotLum, sr = 0, sg = 0, sb = 0, cxs = 0, cys = 0;
+        if (seen[i] || st[i].hot < LANT_HOT_PIX)
+            continue;
+        seen[i] = 1;
+        queue[tail++] = i;
+        x0 = x1 = i % W;
+        y0 = y1 = i / W;
+        while (head < tail) {
+            s32 c = queue[head++], cx = c % W, cy = c / W, d;
+            /* Eight neighbours: a candelabra's bulbs touch at corners. */
+            const s32 nb[8][2] = { { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 },
+                                   { 1, 1 }, { -1, 1 }, { 1, -1 }, { -1, -1 } };
+            if (cx < x0) x0 = cx;
+            if (cx > x1) x1 = cx;
+            if (cy < y0) y0 = cy;
+            if (cy > y1) y1 = cy;
+            hot += st[c].hot;
+            sr += st[c].r; sg += st[c].g; sb += st[c].b;
+            solid += SolidAt(wox + cx * 8 + 4, woy + cy * 8 + 4);
+            if (rep[e[c] & 0xF3FF] > most)
+                most = rep[e[c] & 0xF3FF];
+            cxs += (long)st[c].hot * (cx * 8 + 4);
+            cys += (long)st[c].hot * (cy * 8 + 4);
+            for (d = 0; d < 8; d++) {
+                s32 nx = cx + nb[d][0], ny = cy + nb[d][1], m;
+                if (nx < 0 || ny < 0 || nx >= W || ny >= H)
+                    continue;
+                m = ny * W + nx;
+                if (!seen[m] && st[m].hot >= LANT_HOT_PIX && tail < LANT_MAP_MAX) {
+                    seen[m] = 1;
+                    queue[tail++] = m;
+                }
+            }
+        }
+        if (tail > LANT_TILES || x1 - x0 >= LANT_SPAN || y1 - y0 >= LANT_SPAN || hot < LANT_HOT_MIN)
+            continue;                   /* too big (sky, snow, a white wall) or a speck */
+        if (solid * 2 > tail || most > LANT_REPEAT)
+            continue;                   /* terrain: on solid cells, or a tile used all over */
+        /* The ring two tiles round it must be darker, and mostly not hot. */
+        for (k = y0 - 2; k <= y1 + 2; k++) {
+            s32 x;
+            for (x = x0 - 2; x <= x1 + 2; x++) {
+                s32 m;
+                if (x < 0 || k < 0 || x >= W || k >= H)
+                    continue;
+                if (x >= x0 && x <= x1 && k >= y0 && k <= y1)
+                    continue;
+                m = k * W + x;
+                ringN++;
+                ringLum += st[m].lum;
+                ringHot += st[m].hot >= LANT_HOT_PIX;
+            }
+        }
+        hotLum = hot ? (sr * 77 + sg * 150 + sb * 29) / (hot * 256) : 0;
+        if (ringN == 0 || ringHot * 4 > ringN || ringLum / ringN > hotLum - LANT_CONTRAST)
+            continue;
+        {
+            LampCand *c = &out[n++];
+            float r = (float)sr / hot, g = (float)sg / hot, b = (float)sb / hot;
+            float m = r > g ? (r > b ? r : b) : (g > b ? g : b), mn;
+            c->x = (s32)(cxs / hot);
+            c->y = (s32)(cys / hot);
+            c->col[0] = r / m;
+            c->col[1] = g / m;
+            c->col[2] = b / m;
+            mn = c->col[0] < c->col[1] ? c->col[0] : c->col[1];
+            if (c->col[2] < mn)
+                mn = c->col[2];
+            if (mn > 0.8f) {                /* a white lamp: warm white      */
+                c->col[0] = 1.0f; c->col[1] = 0.85f; c->col[2] = 0.6f;
+            }
+        }
+    }
+    return n;
+}
+
+static int AddLamp(u8 bg, s32 x, s32 y, const float *col)
+{
+    int j;
+    for (j = 0; j < sNumLant; j++)
+        if (sLant[j].bg == bg && abs(sLant[j].mx - x) < 24 && abs(sLant[j].my - y) < 24)
+            return 0;
+    if (sNumLant >= LANTERN_MAX)
+        return 0;
+    sLant[sNumLant].bg = bg;
+    sLant[sNumLant].mx = x;
+    sLant[sNumLant].my = y;
+    memcpy(sLant[sNumLant].col, col, sizeof(sLant[sNumLant].col));
+    sNumLant++;
+    return 1;
+}
+
+/* The layers whose whole map the frame carries: their lamps at map pixels.
+ * Only with the palette settled: a fade washes every colour towards white
+ * or black on the way. */
+static void FindLanterns(const RlFrame *f)
+{
+    static LampCand cand[LANTERN_MAX];
+    int bg, found = 0, j;
+
+    {
+        Lantern mine[LANTERN_MAX];
+        int nm = 0;
+        for (bg = 0; bg < 4; bg++) {
+            const RlTileLayer *L = &f->layers[bg];
+            u32 cnt = (u32)f->lines[0][RL_LINE_BGCNT + bg];
+            int k, n;
+            /* Layers that move with the room only: a lamp (or a moon) on a
+             * far parallax picture is behind the room, not in it. */
+            if (!L->enabled || L->space != RL_SPACE_WORLD || !L->streamed || !L->map
+                || L->factorX != 256 || L->factorY != 256)
+                continue;
+            n = GridLamps(f, ((cnt >> 2) & 3) * 0x4000, (cnt & 0x80) != 0, L->map, L->mapW, L->mapH,
+                          f->camX - (L->mapOffX * 8 + L->mapScrollX) - L->shiftX,
+                          f->camY - (L->mapOffY * 8 + L->mapScrollY) - L->shiftY,
+                          cand, LANTERN_MAX - nm);
+            for (k = 0; k < n && nm < LANTERN_MAX; k++, nm++) {
+                mine[nm].bg = (u8)bg;
+                mine[nm].mx = cand[k].x;
+                mine[nm].my = cand[k].y;
+                memcpy(mine[nm].col, cand[k].col, sizeof(mine[nm].col));
+            }
+        }
+        found = nm;
+        sNumLant = 0;
+        for (j = 0; j < nm; j++)
+            AddLamp(mine[j].bg, mine[j].mx, mine[j].my, mine[j].col);
+    }
+    if (gPortReliefView == 5)
+        PortLog("[katam-port] light: room %u: %d lamps from the maps", (unsigned)sLantRoom, found);
+}
+
+
+/* Sun or point lights for this room: what was asked for, or (Auto) what
+ * people judged the room to be (light_rooms.c), or failing that the sun if
+ * it would light enough of the room's open air -- the room's sun map
  * is worked out (into sTmp) and its sunlit share of air cells measured.  A
  * cave, a hall under a roof, is lit by its lights instead. */
-static int DecideMode(const u8 *grid, s32 cw, s32 ch, int req, float angle)
+static int DecideMode(u16 room, const u8 *grid, s32 cw, s32 ch, int req, float angle)
 {
     s32 mw = (cw * 16) / LIGHT_CELL, mh = (ch * 16) / LIGHT_CELL, tx, ty, i;
     float lit = 0.0f;
-    int air = 0;
+    int air = 0, judged = PortLightRoomIndoor(room);
 
     if (req == LIGHT_REQ_SUN)
         return RL_LIGHT_SUN;
     if (req == LIGHT_REQ_POINT)
         return RL_LIGHT_POINT;
+    if (judged >= 0)
+        return judged ? RL_LIGHT_POINT : RL_LIGHT_SUN;
     for (i = 0; i < cw * ch; i++)
         sOcc[i] = CellOcc(grid[i]);
     BuildSun(cw, ch, mw, angle, 0, mh);
@@ -489,12 +614,10 @@ static void Build(const u8 *grid, s32 cw, s32 ch, float angle, int mode)
 
     for (i = 0; i < cw * ch; i++)
         sOcc[i] = CellOcc(grid[i]);
-    if (mode == RL_LIGHT_POINT) {
-        BuildPoints(cw, ch, mw, mh);
-    } else {
+    if (mode == RL_LIGHT_POINT)
+        memset(sTmp, 0, (size_t)mw * mh * 2 * sizeof(float));   /* the lamps are the composite's */
+    else
         BuildSun(cw, ch, mw, angle, 0, mh);
-        sNumLights = 0;
-    }
     sBuiltMode = mode;
     sBuiltReq = gPortLightParams.mode;
     sBuiltSoft = gPortLightParams.soft;
@@ -550,35 +673,48 @@ static void SunStep(float target, double now)
 
 static void Attach(RlFrame *f, int roomBg);
 
-/* The frame's environment colours and its lights: the room's nearest
- * RL_MAX_LIGHTS to the view's centre. */
+/* The frame's environment colours and its lamps: each placed on the screen
+ * from its layer's scroll this frame (map pixel -> screen -> world), the
+ * nearest RL_MAX_LIGHTS to the view's centre.  Lamps light point-lit rooms
+ * only. */
 static void FrameLook(RlFrame *f)
 {
     const LightLook *L = sBuiltMode == RL_LIGHT_POINT ? &sEnv->cave : &sEnv->sun;
     float cx = (float)(f->camX + f->viewX) + f->viewW * 0.5f;
     float cy = (float)(f->camY + f->viewY) + f->viewH * 0.5f;
-    float d[LIGHT_ROOM_MAX];
-    int used[LIGHT_ROOM_MAX];
-    int i, k, n = 0;
+    float wx[LANTERN_MAX], wy[LANTERN_MAX], d[LANTERN_MAX];
+    int used[LANTERN_MAX];
+    int i, k, n = 0, m = 0;
 
     memcpy(f->envLift, L->lift, sizeof(f->envLift));
     memcpy(f->envShade, L->shade, sizeof(f->envShade));
     memcpy(f->envHalo, L->halo, sizeof(f->envHalo));
     memcpy(f->envSpec, L->spec, sizeof(f->envSpec));
     f->lightMode = (u8)sBuiltMode;
-    for (i = 0; i < sNumLights; i++) {
-        float dx = sLights[i][0] - cx, dy = sLights[i][1] - cy;
-        d[i] = dx * dx + dy * dy;
-        used[i] = 0;
-    }
-    while (n < RL_MAX_LIGHTS && n < sNumLights) {
+    f->lightIndoor = gPortLightParams.indoorShade;
+    f->lampRange = LAMP_RANGE;
+    if (sBuiltMode == RL_LIGHT_POINT)
+        for (i = 0; i < sNumLant; i++) {
+            const RlTileLayer *Ly = &f->layers[sLant[i].bg];
+            if (!Ly->map)
+                continue;
+            /* The composite samples map pixel mapOff*8 + mapScroll + screen
+             * + shift; the world is screen + cam. */
+            wx[m] = (float)(sLant[i].mx - (Ly->mapOffX * 8 + Ly->mapScrollX) - Ly->shiftX + f->camX);
+            wy[m] = (float)(sLant[i].my - (Ly->mapOffY * 8 + Ly->mapScrollY) - Ly->shiftY + f->camY);
+            d[m] = (wx[m] - cx) * (wx[m] - cx) + (wy[m] - cy) * (wy[m] - cy);
+            used[m] = i;
+            m++;
+        }
+    while (n < RL_MAX_LIGHTS && n < m) {
         int best = -1;
-        for (k = 0; k < sNumLights; k++)
-            if (!used[k] && (best < 0 || d[k] < d[best]))
+        for (k = 0; k < m; k++)
+            if (used[k] >= 0 && (best < 0 || d[k] < d[best]))
                 best = k;
-        used[best] = 1;
-        f->lights[n][0] = sLights[best][0];
-        f->lights[n][1] = sLights[best][1];
+        f->lights[n][0] = wx[best];
+        f->lights[n][1] = wy[best];
+        memcpy(f->lightCol[n], sLant[used[best]].col, sizeof(f->lightCol[n]));
+        used[best] = -1;
         n++;
     }
     f->numLights = (u8)n;
@@ -601,7 +737,7 @@ void PortLightRefreshParams(RlFrame *f)
         && (P->mode != sBuiltReq || P->soft != sBuiltSoft || P->depth != sBuiltDepth
             || (sBuiltMode == RL_LIGHT_SUN && !anim && base != sBuiltAngle))) {
         Build(sGrid, sCw, sCh, anim ? sCurAngle : base,
-              DecideMode(sGrid, sCw, sCh, P->mode, sEnv->angle));
+              DecideMode(sRoom, sGrid, sCw, sCh, P->mode, sEnv->angle));
     }
     /* Every time, not only after a rebuild: the presented frame is copied
      * from the built one on each present, which brings back the fields of
@@ -686,13 +822,13 @@ static void Attach(RlFrame *f, int roomBg)
         e = getenv("KATAM_LIGHTING_RELIEF");
         if (e)
             gPortLightParams.relief = (float)atof(e);
-        e = getenv("KATAM_RELIEF_VIEW");
-        if (e && e[0] >= '1' && e[0] <= '4')
+        e = getenv("KATAM_RELIEF_VIEW");   /* 1..5, as the web's ?normals= */
+        if (e && e[0] >= '1' && e[0] <= '5')
             gPortReliefView = e[0] - '0';
         sEnvDone = 1;
     }
     li = &gCurLevelInfo[gLocalPlayerId];
-    if (li->currentRoom == 0xFFFF || li->unk65E > 3)
+    if (li->currentRoom == 0xFFFF || li->unk65E > 3 || PortLightRoomUnlit(li->currentRoom))
         return;
     cw = li->roomWidth / 16;
     ch = li->roomHeight / 16;
@@ -701,6 +837,51 @@ static void Attach(RlFrame *f, int roomBg)
         || ch * 16 / LIGHT_CELL > LIGHT_MAX_H)
         return;
     grid = gUnk_02024ED0[li->unk65E];
+    {
+        /* The lamps: found when the room is new, and again while its palette
+         * still changes (a fade-in) during its first few seconds. */
+        u32 ph = 2166136261u;
+        int k;
+        for (k = 0; k < 512; k++)
+            ph = (ph ^ f->palette[k]) * 16777619u;
+        static int settled;
+        static u16 lastPal[512];
+        int changed = 0;
+        for (k = 0; k < 512; k++)
+            changed += f->palette[k] != lastPal[k];
+        memcpy(lastPal, f->palette, sizeof(lastPal));
+        if (li->currentRoom != sLantRoom) {
+            sLantRoom = li->currentRoom;
+            sLantTries = 0;
+            sLantPal = ph ^ 1u;
+            sNumLant = 0;
+            settled = 0;
+        }
+        /* A fade changes most of the palette at once; an animated colour
+         * (water, a flame) a few.  Find the lamps once the palette has
+         * held for a fifth of a second (a room's fade-in done, or a flash's),
+         * if it is not the palette they were last found with. */
+        if (changed > 128)
+            settled = 0;
+        else
+            settled++;
+        if (settled == 12 && ph != sLantPal && sLantTries < 6 && PortLightRoomLamps(li->currentRoom)) {
+            FindLanterns(f);
+            sLantPal = ph;
+            sLantTries++;
+        }
+        if (gPortReliefView == 5 && settled == 13) {
+            int j;
+            for (j = 0; j < 4; j++)
+                PortLog("[katam-port] light: room %u bg%d space %d streamed %d map %d %dx%d factor %d,%d off %d,%d scroll %d,%d shift %d,%d",
+                        (unsigned)sLantRoom, j, f->layers[j].space, f->layers[j].streamed,
+                        f->layers[j].map != NULL, (int)f->layers[j].mapW, (int)f->layers[j].mapH,
+                        (int)f->layers[j].factorX, (int)f->layers[j].factorY,
+                        (int)f->layers[j].mapOffX, (int)f->layers[j].mapOffY,
+                        (int)f->layers[j].mapScrollX, (int)f->layers[j].mapScrollY,
+                        (int)f->layers[j].shiftX, (int)f->layers[j].shiftY);
+        }
+    }
     for (i = 0; i < n; i++)
         h = (h ^ grid[i]) * 16777619u;
     h ^= (u32)cw << 16;
@@ -709,7 +890,7 @@ static void Attach(RlFrame *f, int roomBg)
     /* Sun or lights: decided when the room (or the asked-for mode) is new. */
     mode = (!sHave || li->currentRoom != sRoom || h != sGridHash
             || gPortLightParams.mode != sBuiltReq)
-           ? DecideMode(grid, cw, ch, gPortLightParams.mode, env->angle) : sBuiltMode;
+           ? DecideMode(li->currentRoom, grid, cw, ch, gPortLightParams.mode, env->angle) : sBuiltMode;
     anim = mode == RL_LIGHT_SUN && gPortLightParams.sunAnim;
     {
         /* The day's clock: wall time, not frames (a 120 Hz display presents
@@ -742,11 +923,14 @@ static void Attach(RlFrame *f, int roomBg)
         sEnv = env;
         Build(grid, cw, ch, target, mode);
         gPortLightBuildMs = NowMs() - t0;
+        if (gPortReliefView == 5)
+            PortLog("[katam-port] light: room %u env %s mode %s", (unsigned)li->currentRoom,
+                    env->name, sBuiltMode == RL_LIGHT_POINT ? "point" : "sun");
         if (getenv("KATAM_LIGHTING_LOG"))
             fprintf(stderr, "[katam-port] light: room %u %dx%d cells -> %dx%d map, %s, %d lights, in %.2f ms\n",
                     (unsigned)li->currentRoom, (int)cw, (int)ch, (int)sMaskW,
                     (int)sMaskH, sBuiltMode == RL_LIGHT_POINT ? "point" : "sun",
-                    sNumLights, gPortLightBuildMs);
+                    sNumLant, gPortLightBuildMs);
         {   /* KATAM_LIGHTING_DUMP=file.pgm: the shadow channel, for looking at */
             const char *d = getenv("KATAM_LIGHTING_DUMP");
             FILE *fp = d ? fopen(d, "wb") : NULL;

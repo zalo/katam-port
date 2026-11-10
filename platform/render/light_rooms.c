@@ -105,3 +105,65 @@ int PortLightRoomArea(u16 room)
     }
     return -1;
 }
+
+/* Indoors or out, as people judged each room from the game's own picture
+ * (one view per room, 2026-11-10): the lighting's Auto mode uses point
+ * lights indoors and the area's sun outside.  A room not judged falls back
+ * to light.c's test (how much of the room's air the sun would light).  The
+ * world map screens are no rooms to light. */
+static const u16 kIndoorRooms[] = {
+    110, 126, 127, 137, 146, 175, 176, 180, 181, 202, 205, 208, 209, 211,
+    212, 215, 217, 219, 222, 223, 224, 225, 227, 228, 229, 230, 290, 304,
+    308, 310, 312, 313, 316, 317, 325, 390, 405, 411, 417, 419, 424, 425,
+    426, 503, 504, 507, 533, 535, 537, 540, 541, 545, 551, 553, 555, 556,
+    557, 570, 600, 601, 603, 604, 605, 606, 608, 609, 610, 611, 612, 613,
+    614, 616, 617, 618, 619, 620, 621, 622, 623, 700, 702, 704, 705, 706,
+    707, 708, 709, 710, 711, 712, 714, 716, 717, 732, 733, 734, 735, 736,
+    738, 739, 741, 743, 744, 811, 815, 816, 819, 823, 824, 826, 827, 829,
+    830, 831, 832, 911, 913, 914, 915, 951,
+};
+static const u16 kOutdoorRooms[] = {
+    102, 107, 115, 117, 118, 119, 120, 121, 134, 136, 139, 141, 143, 147,
+    148, 149, 171, 177, 178, 190, 192, 203, 210, 216, 218, 322, 401, 402,
+    403, 406, 407, 408, 413, 414, 416, 422, 427, 490, 502, 532, 539, 544,
+    719, 730, 742, 800, 803, 810, 814, 822, 825, 828, 950, 970, 980,
+};
+static const u16 kMapRooms[] = {
+    193, 194, 291, 590, 690, 790, 890,
+};
+
+static int InTable(const u16 *t, unsigned n, u16 room)
+{
+    unsigned i;
+    for (i = 0; i < n; i++)
+        if (t[i] == room)
+            return 1;
+    return 0;
+}
+#define IN(t, r) InTable(t, sizeof(t) / sizeof(t[0]), r)
+
+int PortLightRoomIndoor(u16 room)
+{
+    if (IN(kIndoorRooms, room))
+        return 1;
+    if (IN(kOutdoorRooms, room))
+        return 0;
+    return -1;
+}
+
+int PortLightRoomUnlit(u16 room)
+{
+    return IN(kMapRooms, room);
+}
+
+/* Rooms whose background art has lamps the lighting finds and places
+ * right: people reviewed every room's lamps (two rounds, 2026-11-10) and
+ * found them on real lamps here -- mostly Moonlight Mansion's wall lamps --
+ * and elsewhere almost only on bright terrain, water and ice.  Elsewhere the
+ * lamps are not used; an indoor room is lit softly instead. */
+static const u16 kLampRooms[] = { 225, 227, 600, 704, 707, 708, 711, 741 };
+
+int PortLightRoomLamps(u16 room)
+{
+    return IN(kLampRooms, room);
+}

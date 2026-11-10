@@ -606,6 +606,7 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##ls", &s.lightShadow, 0.0f, 0.8f, "Shadow darkness %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lf", &s.lightSoft, 0.0f, 1.0f, "Shadow softness %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lp", &s.lightDepth, 0.0f, 48.0f, "Light into the ground %.0f px", ImGuiSliderFlags_AlwaysClamp);
+        changed |= ImGui::SliderFloat("##li", &s.lightIndoor, 0.0f, 1.0f, "Indoor shade %.2f (away from lamps)", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightMode == 2);
         {
             bool anim = s.lightSunAnim != 0;
@@ -677,6 +678,7 @@ static int PageDisplay(void)
             s.lightCharReach = d.lightCharReach;
             s.lightCharDepth = d.lightCharDepth;
             s.lightReliefOn = d.lightReliefOn;
+            s.lightIndoor = d.lightIndoor;
             changed = 1;
         }
         ImGui::EndDisabled();

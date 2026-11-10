@@ -62,6 +62,7 @@ typedef struct PortSettings {
     float lightCharReach; /* character shadow length, px                    */
     float lightCharDepth; /* character shadows into solid ground, px        */
     int lightReliefOn;  /* normal maps at all (relief, shine)               */
+    float lightIndoor;  /* point-lit rooms: shade away from the lamps       */
 } PortSettings;
 
 extern PortSettings gPortSettings;
