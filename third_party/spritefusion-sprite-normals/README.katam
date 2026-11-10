@@ -10,13 +10,18 @@ VRAM; the crate's PNG/GIF front end and its CLI and wasm wrappers are not used.
 
 Where the port differs from the crate:
 
-- The distance to the silhouette is exact up to RELIEF_R pixels and capped
-  there, instead of unbounded. The crate's shape term grows as ln(1 + d / 4)
-  for ever; past 12 px its slope is under a quarter of its edge slope.
+- The distance to the silhouette is capped instead of unbounded: at 32 px
+  for sprites, which no GBA sprite (64x64 at most) reaches, so they are exact;
+  at 12 px for background layers, whose solid ground would otherwise become
+  one dome the size of the room.
 - Islands (8-connected components) are not split out. The crate processes
   them one at a time, but that only re-centres the lightness, and its
   normalised blur makes that a no-op.
 - Intermediates are half floats.
-- The defaults are the crate's own: normal strength 1.5, detail strength 6,
-  detail scale 0.6, shape strength 1.15, shape radius 4, softness 1.15,
-  alpha threshold 0.03, OpenGL green channel.
+- Background layers use the crate's defaults: normal strength 1.5, detail
+  strength 6, detail scale 0.6, shape strength 1.15, shape radius 4, softness
+  1.15, alpha threshold 0.03, OpenGL green channel.  Sprites use detail
+  strength 2 (the CLI's --detail-strength 2): the game's sprites are shaded
+  already, and at 6 lighting that shading again doubled it.
+- Sprites are processed per group of touching hardware sprites (one
+  character), not per hardware sprite.

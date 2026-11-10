@@ -23,6 +23,7 @@ function fbo(t) { const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEB
 async function pixels(url) { const im = new Image(); im.src = url; await im.decode();
   const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
   const x = c.getContext('2d'); x.drawImage(im, 0, 0); return x.getImageData(0, 0, im.width, im.height); }
+let DETAIL = 6;
 function run(img) {
   const w = img.width, h = img.height, W = w + 2 * G, H = h + 2 * G;
   const alb = new Uint8Array(W * H * 4);
@@ -37,7 +38,9 @@ function run(img) {
   for (let i = 0; i < 5; i++) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, outs[i]); gl.useProgram(P[i]);
     gl.uniform2i(gl.getUniformLocation(P[i], 'uSize'), W, H);
-    gl.uniform1i(gl.getUniformLocation(P[i], 'uSprY0'), window.SPRY0 ?? 0);
+    gl.uniform1i(gl.getUniformLocation(P[i], 'uSprY0'), 0);
+    gl.uniform4f(gl.getUniformLocation(P[i], 'uGenS'), 1.15, DETAIL, 1.5, 0);
+    gl.uniform4f(gl.getUniformLocation(P[i], 'uGenB'), 1.15, DETAIL, 1.5, 0);
     const la = gl.getUniformLocation(P[i], 'uAlb'), li = gl.getUniformLocation(P[i], 'uIn');
     gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, tA); if (la) gl.uniform1i(la, 10);
     gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, ins[i]); if (li) gl.uniform1i(li, 9);
@@ -57,8 +60,12 @@ function draw(arrs, w, h, k) { const c = document.createElement('canvas'); c.wid
     t.getContext('2d').putImageData(new ImageData(a, w, h), 0, 0); x.drawImage(t, i * (w * k + 8), 0, w * k, h * k); });
   return c; }
 const results = {};
-for (const name of ['blob20', 'rock36', 'twoparts', 'big48']) {
-  const img = await pixels(name + '.png'), ref = await pixels(name + '_n.png');
+/* The crate's defaults (the background layers' settings), then detail 2
+ * (the sprites', gl_renderer.c kReliefGenSpr) against --detail-strength 2. */
+for (const [name, detail, sfx] of [['blob20', 6, ''], ['rock36', 6, ''], ['twoparts', 6, ''], ['big48', 6, ''],
+                                    ['blob20', 2, '_d2'], ['rock36', 2, '_d2'], ['twoparts', 2, '_d2'], ['big48', 2, '_d2']]) {
+  DETAIL = detail;
+  const img = await pixels(name + '.png'), ref = await pixels(name + '_n' + sfx + '.png');
   const got = run(img);
   let max = [0, 0, 0], sum = 0, n = 0, over2 = 0, amask = 0;
   const diff = new Uint8ClampedArray(got.length);
@@ -71,9 +78,9 @@ for (const name of ['blob20', 'rock36', 'twoparts', 'big48']) {
     for (let c = 0; c < 3; c++) diff[i * 4 + c] = Math.min(255, worst * 25);
     n++; if (worst > 2) over2++;
   }
-  results[name] = { w: img.width, h: img.height, opaque: n, maxDiff: max, meanAbs: +(sum / (3 * n)).toFixed(3), pixelsOver2: over2, alphaMismatch: amask };
-  log(name + ' ' + JSON.stringify(results[name]));
-  const lbl = document.createElement('div'); lbl.textContent = name + ': sprite | crate (Rust CLI) | GPU port | |difference| x25';
+  results[name + sfx] = { w: img.width, h: img.height, opaque: n, maxDiff: max, meanAbs: +(sum / (3 * n)).toFixed(3), pixelsOver2: over2, alphaMismatch: amask };
+  log(name + ' detail ' + detail + ' ' + JSON.stringify(results[name + sfx]));
+  const lbl = document.createElement('div'); lbl.textContent = name + ' (detail ' + detail + '): sprite | crate (Rust CLI) | GPU port | |difference| x25';
   document.getElementById('vis').append(lbl, draw([img.data, ref.data, got, diff], img.width, img.height, 8));
 }
 window.__results = results;

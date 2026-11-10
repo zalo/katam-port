@@ -56,8 +56,13 @@ static const char *kRelCommon =
     "#define RS " RELIEF_STR(RELIEF_R_SPRITE) "\n"
     "uniform ivec2 uSize;\n"
     "uniform int uSprY0;\n"
+    /* The crate's strengths -- shape, detail, normal, - -- for sprites and
+     * for background layers (gl_renderer.c, kReliefGen*). */
+    "uniform vec4 uGenS;\n"
+    "uniform vec4 uGenB;\n"
     "bool inside(ivec2 p) { return p.x >= 0 && p.y >= 0 && p.x < uSize.x && p.y < uSize.y; }\n"
     "int capAt(ivec2 p) { return p.y >= uSprY0 ? RS : RR; }\n"
+    "vec4 genAt(ivec2 p) { return p.y >= uSprY0 ? uGenS : uGenB; }\n"
     /* Gaussians, normalised over their taps (field.rs gaussian): sigma 0.6
      * (radius 2), 1.2 and 1.15 (radius 4).  Index |offset|. */
     "const float K06[3] = float[3](0.663818329, 0.165524567, 0.002566269);\n"
@@ -121,7 +126,7 @@ static const char *kRel2Fs =
     "    }\n"
     "    float inset = max(min(sqrt(best), float(cap)) - 0.5, 0.0);\n"
     /* relief.rs: shape_strength * reach * ln(1 + inset / reach). */
-    "    shape = 1.15 * 4.0 * log(1.0 + inset / 4.0);\n"
+    "    shape = genAt(p).x * 4.0 * log(1.0 + inset / 4.0);\n"
     "  }\n"
     "  vec4 h = vec4(0.0);\n"               /* H06(La) H06(a) H12(La) H12(a) */
     "  for (int i = -4; i <= 4; i++) {\n"
@@ -155,7 +160,7 @@ static const char *kRel3Fs =
     "  }\n"
     /* field.rs masked_gaussian: numerator / max(denominator, 1e-8). */
     "  float fine = v.x / max(v.y, 1e-8), broad = v.z / max(v.w, 1e-8);\n"
-    "  oT = packHalf2x16(vec2(hs, 6.0 * (0.7 * fine + 0.3 * broad)));\n"
+    "  oT = packHalf2x16(vec2(hs, genAt(p).y * (0.7 * fine + 0.3 * broad)));\n"
     "}\n";
 
 /* 4: -> the height, V115(H115(shape)) + detail, as float bits. */
@@ -187,7 +192,8 @@ static const char *kRel5Fs =
     "  float dl = H(p + ivec2(-1, 1)), d = H(p + ivec2(0, 1)), dr = H(p + ivec2(1, 1));\n"
     "  float dx = (ur + 2.0 * r + dr - ul - 2.0 * l - dl) * 0.125;\n"
     "  float dy = (dl + 2.0 * d + dr - ul - 2.0 * u - ur) * 0.125;\n"
-    "  vec3 n = normalize(vec3(-dx * 1.5, dy * 1.5, 1.0));\n"
+    "  float k = genAt(p).z;\n"
+    "  vec3 n = normalize(vec3(-dx * k, dy * k, 1.0));\n"
     "  oN = vec4(n * 0.5 + 0.5, 1.0);\n"
     "}\n";
 

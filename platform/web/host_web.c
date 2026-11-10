@@ -62,9 +62,11 @@ EM_JS(int, PortWebLightingParam, (void), {
     return 0;
 });
 
-/* ?normals=1: lit frames show their normal maps (render/relief_glsl.h). */
+/* ?normals=1: lit frames show their normal maps (render/relief_glsl.h);
+ * 2 and 3: the relief atlas's sprite art and sprite normals, pixel for pixel. */
 EM_JS(int, PortWebNormalsParam, (void), {
-    try { return new URLSearchParams(location.search).get('normals') === '1' ? 1 : 0; }
+    try { var n = parseInt(new URLSearchParams(location.search).get('normals') || '0', 10);
+          return n >= 1 && n <= 3 ? n : 0; }
     catch (e) { return 0; }
 });
 

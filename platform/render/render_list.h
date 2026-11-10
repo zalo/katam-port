@@ -247,7 +247,8 @@ typedef struct PortLightParams {
                                     1.0f, 0.35f, 0.8f }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
-/* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1). */
+/* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);
+ * 2, 3: the relief atlas's sprite art, sprite normals. */
 extern int gPortReliefView;
 extern double gPortLightBuildMs;
 void PortLightResolve(void);

@@ -9,13 +9,16 @@
 # page in build/relief_check.  Serve that directory over HTTP and open
 # index.html in a WebGL2 browser: it runs the five passes on each sprite and
 # prints the largest per-channel difference from the CLI's map (expect 1/255,
-# from half-float rounding).  No game data is involved.
+# from half-float rounding), with the crate's defaults (the background
+# layers' settings) and with --detail-strength 2 (the sprites').  No game data
+# is involved.  tune.html, staged alongside, compares lighting settings on
+# sprites you capture yourself (see its header).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 CLI=${SPRITE_NORMALS:-spritefusion-sprite-normals}
 OUT=build/relief_check
 mkdir -p "$OUT"
-cp tools/relief_check/index.html "$OUT"/
+cp tools/relief_check/index.html tools/relief_check/tune.html tools/relief_check/tune_variants.json "$OUT"/
 python3 -I tools/relief_check/extract_glsl.py . > "$OUT"/glsl.js
 cd "$OUT"
 magick -size 20x20 xc:none -fill white -draw "circle 9.5,9.5 9.5,0.5" \
@@ -29,5 +32,6 @@ magick -size 30x18 xc:none -fill "#c08040" -draw "rectangle 0,4 29,13" \
 for f in blob20 rock36 big48 twoparts; do
     magick $f.png -channel A -threshold 50% +channel -depth 8 PNG32:$f.png
     "$CLI" $f.png -o ${f}_n.png --force >/dev/null
+    "$CLI" $f.png -o ${f}_n_d2.png --detail-strength 2 --force >/dev/null
 done
 echo "  staged $OUT -- e.g. python3 -m http.server -d $OUT, then open index.html"

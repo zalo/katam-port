@@ -399,26 +399,41 @@ art only exists once the game has decoded it into VRAM.
 Per frame, before the sprite pass:
 
 1. `PlanRelief` packs the layers' pieces (view + 20 px all round, in the
-   composite's own layer coordinates) and each distinct sprite (tile, size,
-   palette, depth) onto shelves of an RGBA8 atlas with transparent gutters.
+   composite's own layer coordinates) and the on-screen world sprites onto
+   shelves of an RGBA8 atlas with transparent gutters.  Sprites are packed in
+   *groups*: a character is often several hardware sprites side by side, and
+   made one by one each piece got a rim where it meets the next (a crease down
+   the sword knight).  Sprites that touch or overlap with the same palette,
+   priority, blending and sub-pixel position are one group, one picture.
 2. `RunRelief` draws the layers through the composite program's decode branch
-   and the sprites, unflipped and unrotated, through a decode variant of the
-   sprite program, then runs the crate's steps as five full-atlas passes
-   (half floats in integer targets, which every GLES 3.0 can render to).
-3. The sprite pass writes a second target, each pixel's normal turned by its
-   sprite's flips or affine matrix; the composite reads that for sprite
-   pixels and the atlas for layer pixels.
+   and each group's sprites, as on screen (flipped, rotated, front one on
+   top), through a decode variant of the sprite program, then runs the crate's
+   steps as five full-atlas passes (half floats in integer targets, which
+   every GLES 3.0 can render to).
+3. The sprite pass writes a second target, each pixel's normal read at its
+   place in its group's picture; the composite reads that for sprite pixels
+   and the atlas for layer pixels.
 
 The composite shades the top pixel's normal against the sun's direction or the
 room's lights, relative to what a flat pixel gets, so flat art keeps its
-colours; shade (no direct light) gets none of it.  Settings > Display >
+colours; shade (no direct light) gets none of it.
+
+Sprites are tuned apart from the layers (`kReliefGenSpr`, `kReliefRespSpr`).
+With the crate's defaults a small sprite looked awful: it is nearly all rim,
+and its painted shading, read as relief at detail strength 6 and lit again,
+doubled -- the standing Kirby went chalky on top and muddy below, colours
+clipped to white.  Sprites therefore use detail strength 2, stay within
+0.72-1.25 of their own colour, and brighten without leaving their hue; the
+puffed-up Kirby keeps its dome and highlight.  `tools/relief_check/tune.html`
+was used to choose this on real sprites.  Settings > Display >
 Lighting: **Relief** (0 turns it off and skips the passes), **Shine**,
 **Light height**.  `?normals=1` (`KATAM_RELIEF_VIEW=1`) shows the normal maps
-instead of the picture.
+instead of the picture; `?normals=2` and `=3` show the atlas's sprite groups
+and their normals, pixel for pixel.
 
 Checked against the crate's own CLI with `tools/relief_check/`: on 20-48 px
 test sprites the port's normals differ from the CLI's by at most 1/255 per
-channel.  `make regress-wasm` is unchanged (renderer only).  Not measured: the
+channel, at the crate's defaults and at `--detail-strength 2`.  `make regress-wasm` is unchanged (renderer only).  Not measured: the
 cost on a phone GPU.
 
 ## Next

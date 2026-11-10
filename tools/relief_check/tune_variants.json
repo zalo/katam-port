@@ -1,0 +1,8 @@
+[
+ {"name":"A  no relief","w":0},
+ {"name":"B  current","gen":[1.15,6,1.5]},
+ {"name":"N  gen 1.15/2/1.5; lambert amb .5; h .9; shine .3; clamp .72-1.25; hue-keep","gen":[1.15,2,1.5],"amb":0.5,"height":0.9,"shine":0.3,"lo":0.72,"hi":1.25,"hue":1},
+ {"name":"O  gen 1.15/2/1.5; half-lambert amb .4; shine .3; clamp .72-1.25; hue-keep","gen":[1.15,2,1.5],"amb":0.4,"half":1,"shine":0.3,"lo":0.72,"hi":1.25,"hue":1},
+ {"name":"P  gen 1.15/3/1.5; lambert amb .45; h .8; shine .3; clamp .7-1.3; hue-keep","gen":[1.15,3,1.5],"amb":0.45,"shine":0.3,"lo":0.7,"hi":1.3,"hue":1},
+ {"name":"Q  gen 1.15/2/1.2; lambert amb .5; h .9; shine .25; clamp .75-1.2; hue-keep","gen":[1.15,2,1.2],"amb":0.5,"height":0.9,"shine":0.25,"lo":0.75,"hi":1.2,"hue":1}
+]

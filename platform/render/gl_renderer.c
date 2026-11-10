@@ -140,10 +140,23 @@ static const u8 *sLightPtr;
 #define UNIT_OBJN 8
 #define UNIT_IN 9
 #define UNIT_ALB 10
+#define UNIT_ALB_VIEW 11             /* the art, for ?normals=2 only          */
 static GLuint sTexObjN;
 static GLuint sProgObjDec, sProgRel[5];
-static GLint uRelSize[5], uRelSprY0[5], uDecView, uDecK, uDecWin;
-static GLint uCDecode, uCNrm, uCNrmOff, uCRelief, uCSunDir, uCNrmView;
+static GLint uRelSize[5], uRelSprY0[5], uRelGenS[5], uRelGenB[5], uDecView, uDecK, uDecWin;
+/* The crate's strengths (shape, detail, normal, -): its defaults for the
+ * background layers.  Sprites take less of their painted shading as relief
+ * (detail 2, not 6): the game's sprites are shaded already, and lighting
+ * that shading again turned a small one chalky on top and muddy below. */
+static const float kReliefGenBg[4] = { 1.15f, 6.0f, 1.5f, 0.0f };
+static const float kReliefGenSpr[4] = { 1.15f, 2.0f, 1.5f, 0.0f };
+/* The composite's response (ambient, darkest, brightest, keep hue): sprites
+ * within 0.72..1.25 of their own colours and never clipped to white;
+ * background layers as first tuned.  tools/relief_check/tune.html compares
+ * settings on real sprites. */
+static const float kReliefRespSpr[4] = { 0.5f, 0.72f, 1.25f, 1.0f };
+static const float kReliefRespBg[4] = { 0.45f, 0.0f, 10.0f, 0.0f };
+static GLint uCDecode, uCNrm, uCNrmOff, uCRelief, uCSunDir, uCNrmView, uCSprY0, uCRespS, uCRespB;
 static GLuint sTexAlb, sTexT1, sTexT2, sTexT3, sTexT4, sTexNrm;
 static GLuint sFboAlb, sFboT1, sFboT2, sFboT3, sFboT4, sFboNrm;
 static int sRelTexW, sRelTexH;   /* allocated                                */
@@ -197,10 +210,10 @@ static const char *kObjVs =
  * priority, 10 semi-transparent, 12 1D mapping.
  *
  * Two programs from this source.  The sprite pass: the colour target, and a
- * second, RGBA8 one with the sprite's normal (relief_glsl.h) turned by its
- * flips or affine matrix, or a flat normal with alpha 0 where it has none.
- * With RELIEF_DECODE: the sprite's own colours, opaque, into the relief
- * atlas (the instance is placed there unflipped and unrotated). */
+ * second, RGBA8 one with the sprite's normal (relief_glsl.h), or a flat
+ * normal with alpha 0 where it has none.  With RELIEF_DECODE: the sprite's
+ * own colours, opaque, into the relief atlas, drawn there as on screen
+ * (PlanRelief places it in its group's picture). */
 static const char *kObjFs =
     "flat in ivec4 vA;\n"
     "flat in ivec4 vB;\n"
@@ -262,23 +275,10 @@ static const char *kObjFs =
     "  if (uWinPass != 0) { oObj = uvec4(1u); return; }\n"
     "  oObj = uvec4(uint(col & 255), uint(col >> 8),\n"
     "               uint(((fl >> 8) & 3) | (((fl >> 10) & 1) << 2) | 8 | (((fl >> 13) & 1) << 4)), 0u);\n"
-    "  if (vD.z != 0) {\n"
-    /* The map is the unflipped sprite's.  n ~ (-gx, gy, 1) * s for the
-     * height's gradient g in image rows (lib.rs); the screen's gradient is
-     * the texture's through the flip, or through the affine matrix's
-     * transpose (texel = M * screen offset). */
-    "    vec3 n = texelFetch(uNrmAtlas, vD.xy + ivec2(texX, texY), 0).xyz * 2.0 - 1.0;\n"
-    "    if ((fl & 128) != 0) {\n"
-    "      vec2 g = vec2(-n.x, n.y) / max(n.z, 0.05);\n"
-    "      vec2 gs = vec2(float(vC.x) * g.x + float(vC.z) * g.y,\n"
-    "                     float(vC.y) * g.x + float(vC.w) * g.y) / 256.0;\n"
-    "      n = vec3(-gs.x, gs.y, 1.0);\n"
-    "    } else {\n"
-    "      if ((fl & 32) != 0) n.x = -n.x;\n"
-    "      if ((fl & 64) != 0) n.y = -n.y;\n"
-    "    }\n"
-    "    oNrm = vec4(normalize(n) * 0.5 + 0.5, 1.0);\n"
-    "  }\n"
+    "  if (vD.z != 0)\n"
+    /* The map is of the sprite's group as drawn: the box pixel's normal is
+     * already the screen's. */
+    "    oNrm = vec4(texelFetch(uNrmAtlas, vD.xy + q, 0).xyz, 1.0);\n"
     "#endif\n"
     "}\n";
 
@@ -322,9 +322,15 @@ static const char *kCompFs =
     "uniform ivec4 uNrmOff[4];\n"   /* atlas - layer coords, has, -       */
     "uniform highp sampler2D uNrmAtlas;\n"
     "uniform highp sampler2D uObjN;\n"
-    "uniform vec4 uRelief;\n"      /* strength, shine, ambient, light z  */
+    "uniform vec4 uRelief;\n"      /* strength, shine, -, light z        */
     "uniform vec3 uSunDir;\n"      /* towards the sun, +y up             */
-    "uniform int uNrmView;\n"      /* 1: show the normals                */
+    /* The response, per kind of pixel: ambient, darkest, brightest factor,
+     * 1 = brighten without leaving the colour's hue (no clipping to white). */
+    "uniform vec4 uRespS;\n"       /* sprites                            */
+    "uniform vec4 uRespB;\n"       /* background layers                  */
+    "uniform int uNrmView;\n"      /* 1 the normals; 2, 3 the atlas's sprite art, normals */
+    "uniform highp sampler2D uAlbAtlas;\n"
+    "uniform int uSprY0;\n"        /* the atlas's first sprite row       */
     "out vec4 oColor;\n"
     "int L(int line, int w) {\n"
     "  ivec4 t = texelFetch(uLines, ivec2(w >> 2, line), 0);\n"
@@ -570,6 +576,12 @@ static const char *kCompFs =
     /* Sunlight (light.c): the sun from the upper left, or point lights in
      * the room.  Every world layer and world sprite takes the shadow map's
      * shade and warmth (and the point lights' halo); never the HUD. */
+    "  if (uNrm != 0 && uNrmView >= 2 && !hudPass) {\n"
+    "    vec4 a = uNrmView == 2 ? texelFetch(uAlbAtlas, v + ivec2(0, uSprY0), 0)\n"
+    "                           : texelFetch(uNrmAtlas, v + ivec2(0, uSprY0), 0);\n"
+    "    oColor = a.a > 0.5 ? vec4(a.rgb, 1.0) : vec4(1.0, 0.0, 1.0, 1.0);\n"
+    "    return;\n"
+    "  }\n"
     "  if (uLight != 0 && !hudPass && !letterbox) {\n"
     "    vec2 wp = vec2(b) / 256.0 + vec2(uLightGeom.xy);\n"
     "    float K = uLightK;\n"
@@ -607,11 +619,21 @@ static const char *kCompFs =
     "            Ld = length(acc) > 1e-4 ? normalize(acc) : vec3(0.0, 0.0, 1.0);\n"
     "            lit = clamp(sl.g * 2.0, 0.0, 1.0);\n"
     "          }\n"
-    "          float amb = uRelief.z;\n"
+    "          vec4 R = top == 4 ? uRespS : uRespB;\n"
+    "          float amb = R.x;\n"
     "          float d0 = amb + (1.0 - amb) * max(Ld.z, 0.0);\n"
     "          float d1 = amb + (1.0 - amb) * max(dot(N, Ld), 0.0);\n"
     "          float w = clamp(K * uRelief.x * lit * plane, 0.0, 2.0);\n"
-    "          col *= max(mix(1.0, d1 / max(d0, 1e-3), w), 0.0);\n"
+    "          float fr = max(mix(1.0, clamp(d1 / max(d0, 1e-3), R.y, R.z), w), 0.0);\n"
+    "          vec3 c0 = col;\n"
+    "          col = c0 * fr;\n"
+    /* Brightening a saturated colour clips it towards white; stop where
+     * its brightest channel is full, and let only a little of the rest
+     * through as white. */
+    "          if (R.w > 0.5 && fr > 1.0) {\n"
+    "            float mc = max(max(c0.r, c0.g), c0.b), fe = min(fr, 1.0 / max(mc, 1e-3));\n"
+    "            col = c0 * fe + (fr - fe) * mc * 0.3;\n"
+    "          }\n"
     "          vec3 Hv = normalize(Ld + vec3(0.0, 0.0, 1.0));\n"
     "          float sp = max(pow(max(dot(N, Hv), 0.0), 20.0) - pow(Hv.z, 20.0), 0.0);\n"
     "          col += K * uRelief.y * lit * plane * sp * vec3(1.0, 0.92, 0.75);\n"
@@ -798,6 +820,8 @@ int GlrInit(void *(*getProc)(const char *), int es)
             G(glUseProgram)(sProgRel[i]);
             uRelSize[i] = G(glGetUniformLocation)(sProgRel[i], "uSize");
             uRelSprY0[i] = G(glGetUniformLocation)(sProgRel[i], "uSprY0");
+            uRelGenS[i] = G(glGetUniformLocation)(sProgRel[i], "uGenS");
+            uRelGenB[i] = G(glGetUniformLocation)(sProgRel[i], "uGenB");
             {
                 GLint a = G(glGetUniformLocation)(sProgRel[i], "uAlb");
                 GLint b = G(glGetUniformLocation)(sProgRel[i], "uIn");
@@ -850,6 +874,9 @@ int GlrInit(void *(*getProc)(const char *), int es)
     uCRelief = G(glGetUniformLocation)(sProgComp, "uRelief");
     uCSunDir = G(glGetUniformLocation)(sProgComp, "uSunDir");
     uCNrmView = G(glGetUniformLocation)(sProgComp, "uNrmView");
+    uCSprY0 = G(glGetUniformLocation)(sProgComp, "uSprY0");
+    uCRespS = G(glGetUniformLocation)(sProgComp, "uRespS");
+    uCRespB = G(glGetUniformLocation)(sProgComp, "uRespB");
     {
         GLint loc = G(glGetUniformLocation)(sProgComp, "uShadow");
         if (loc >= 0)
@@ -860,6 +887,9 @@ int GlrInit(void *(*getProc)(const char *), int es)
         loc = G(glGetUniformLocation)(sProgComp, "uObjN");
         if (loc >= 0)
             G(glUniform1i)(loc, UNIT_OBJN);
+        loc = G(glGetUniformLocation)(sProgComp, "uAlbAtlas");
+        if (loc >= 0)
+            G(glUniform1i)(loc, UNIT_ALB_VIEW);
         G(glUniform4i)(uCDecode, -1, 0, 0, 0);
         G(glUniform1i)(uCNrm, 0);
     }
@@ -1226,16 +1256,36 @@ static int ReliefPlace(ReliefPacker *P, int w, int h, int *ox, int *oy)
     return 1;
 }
 
-#define RELIEF_HASH 2048        /* > RL_MAX_SPRITES: probing always ends     */
+/* A sprite of the frame as the relief sees it: its box at whole game
+ * pixels (the fraction is the group's), and what it may be grouped by. */
+typedef struct ReliefSpr {
+    s32 x, y, bw, bh;
+    s32 sub;                    /* subX, subY packed: one fraction a group   */
+    int key;                    /* palette (or 8bpp), priority, semi         */
+    int idx;                    /* in f->sprites                             */
+    int parent;                 /* union-find                                */
+} ReliefSpr;
+
+static int ReliefRoot(ReliefSpr *r, int i)
+{
+    while (r[i].parent != i) {
+        r[i].parent = r[r[i].parent].parent;
+        i = r[i].parent;
+    }
+    return i;
+}
+
+#define RELIEF_GROUP_MAX 192    /* px: a bigger group splits into its sprites */
 
 static void PlanRelief(const RlFrame *f)
 {
-    static u32 keys[RELIEF_HASH];
-    static s32 slot[RELIEF_HASH][2];
-    static u8 slotOk[RELIEF_HASH];
+    static ReliefSpr r[RL_MAX_SPRITES];
+    static s32 gbox[RL_MAX_SPRITES][4];   /* per root: x0 y0 x1 y1           */
+    static s32 gslot[RL_MAX_SPRITES][2];
+    static u8 gok[RL_MAX_SPRITES];
     ReliefPacker P;
-    int bg, aw, rw, rh, n = (int)f->numSprites;
-    int i;
+    int bg, aw, rw, rh, n = (int)f->numSprites, m = 0;
+    int i, j;
 
     sRelOn = 0;
     sDecN = 0;
@@ -1283,19 +1333,19 @@ static void PlanRelief(const RlFrame *f)
         P.shelf = 0;
     }
     sRelSprY0 = P.y;
-    memset(keys, 0, sizeof(keys));
-    if (n > sDecCap) {
-        sDecCap = n + 64;
-        sDecInst = (s32 *)realloc(sDecInst, (size_t)sDecCap * INST_INTS * sizeof(s32));
-    }
+
+    /* The on-screen world sprites.  A character is often several hardware
+     * sprites side by side (a body and an arm, two halves); made one by one,
+     * each piece would get a rim where it meets the next.  So sprites that
+     * touch or overlap, with the same palette, priority, blending and
+     * sub-pixel position, are one group, drawn together -- as on screen,
+     * flipped and rotated, the front one on top -- and the group's normals
+     * are made from the whole picture, in screen orientation. */
     for (i = 0; i < n; i++) {
         const RlSprite *s = &f->sprites[i];
-        u32 shape = (s->attr0 >> 14) & 3, size = (s->attr1 >> 14) & 3, key, h;
-        s32 w = kObjW[shape][size], ht = kObjH[shape][size];
-        int affine = (s->attr0 & 0x100) != 0;
-        int dbl = affine && (s->attr0 & 0x200);
-        s32 bw = w << dbl, bh = ht << dbl, x, y;
-        int fl;
+        u32 shape = (s->attr0 >> 14) & 3, size = (s->attr1 >> 14) & 3;
+        int affine = (s->attr0 & 0x100) != 0, dbl = affine && (s->attr0 & 0x200);
+        s32 bw = kObjW[shape][size] << dbl, bh = kObjH[shape][size] << dbl, x, y;
 
         if (s->space == RL_SPACE_HUD)
             continue;
@@ -1303,36 +1353,95 @@ static void PlanRelief(const RlFrame *f)
         y = (s->y - f->viewY) * 256 + s->subY - f->viewSubY;
         if (x >= f->viewW * 256 || y >= f->viewH * 256 || x + bw * 256 <= 0 || y + bh * 256 <= 0)
             continue;
-        fl = (s->attr2 >> 12) & 15;
-        if (s->attr0 & 0x2000)
-            fl = 16;                    /* 8bpp: no palette bank             */
-        if (f->objOneD)
-            fl |= 4096;
-        key = (u32)(s->attr2 & 0x3FF) | ((u32)w << 10) | ((u32)ht << 17)
-            | ((u32)(fl & 31) << 24) | ((fl & 4096) ? 1u << 29 : 0);
-        h = (key * 2654435761u) >> 21;
-        while (keys[h] != 0 && keys[h] != key + 1)
-            h = (h + 1) & (RELIEF_HASH - 1);
-        if (keys[h] == 0) {
-            int ax = 0, ay = 0;
-            keys[h] = key + 1;
-            slotOk[h] = (u8)ReliefPlace(&P, w, ht, &ax, &ay);
-            slot[h][0] = ax;
-            slot[h][1] = ay;
-            if (slotOk[h]) {
-                s32 *o = sDecInst + sDecN * INST_INTS;
-                memset(o, 0, INST_BYTES);
-                o[0] = ax * 256; o[1] = ay * 256; o[2] = w; o[3] = ht;
-                o[4] = w; o[5] = ht; o[6] = s->attr2 & 0x3FF; o[7] = fl;
-                o[8] = 256; o[11] = 256;
-                sDecN++;
+        r[m].x = s->x;
+        r[m].y = s->y;
+        r[m].bw = bw;
+        r[m].bh = bh;
+        r[m].sub = ((s32)(u16)s->subX << 16) | (u16)s->subY;
+        r[m].key = ((s->attr0 & 0x2000) ? 16 : ((s->attr2 >> 12) & 15))
+                 | (((s->attr2 >> 10) & 3) << 5) | ((((s->attr0 >> 10) & 3) == 1) << 7);
+        r[m].idx = i;
+        r[m].parent = m;
+        m++;
+    }
+    for (i = 0; i < m; i++)
+        for (j = i + 1; j < m; j++) {
+            const ReliefSpr *a = &r[i], *b = &r[j];
+            if (a->key != b->key || a->sub != b->sub)
+                continue;
+            if (a->x > b->x + b->bw || b->x > a->x + a->bw
+                || a->y > b->y + b->bh || b->y > a->y + a->bh)
+                continue;
+            {
+                int ra = ReliefRoot(r, i), rb = ReliefRoot(r, j);
+                if (ra != rb)
+                    r[rb > ra ? rb : ra].parent = rb > ra ? ra : rb;
             }
         }
-        if (slotOk[h]) {
-            sSprSlot[i][0] = slot[h][0];
-            sSprSlot[i][1] = slot[h][1];
-            sSprHas[i] = 1;
+    for (i = 0; i < m; i++) {
+        int g = ReliefRoot(r, i);
+        if (g == i) {
+            gbox[g][0] = r[i].x; gbox[g][1] = r[i].y;
+            gbox[g][2] = r[i].x + r[i].bw; gbox[g][3] = r[i].y + r[i].bh;
         }
+    }
+    for (i = 0; i < m; i++) {
+        int g = ReliefRoot(r, i);
+        if (r[i].x < gbox[g][0]) gbox[g][0] = r[i].x;
+        if (r[i].y < gbox[g][1]) gbox[g][1] = r[i].y;
+        if (r[i].x + r[i].bw > gbox[g][2]) gbox[g][2] = r[i].x + r[i].bw;
+        if (r[i].y + r[i].bh > gbox[g][3]) gbox[g][3] = r[i].y + r[i].bh;
+    }
+    /* Too big (a long chain of one palette): every sprite its own group. */
+    for (i = 0; i < m; i++) {
+        int g = ReliefRoot(r, i);
+        gok[i] = gbox[g][2] - gbox[g][0] > RELIEF_GROUP_MAX
+                 || gbox[g][3] - gbox[g][1] > RELIEF_GROUP_MAX;
+    }
+    for (i = 0; i < m; i++)
+        if (gok[i]) {
+            r[i].parent = i;
+            gbox[i][0] = r[i].x; gbox[i][1] = r[i].y;
+            gbox[i][2] = r[i].x + r[i].bw; gbox[i][3] = r[i].y + r[i].bh;
+        }
+    for (i = 0; i < m; i++) {
+        int g = ReliefRoot(r, i);
+        if (g == i)
+            gok[g] = (u8)ReliefPlace(&P, gbox[g][2] - gbox[g][0], gbox[g][3] - gbox[g][1],
+                                     &gslot[g][0], &gslot[g][1]);
+    }
+
+    if (m > sDecCap) {
+        sDecCap = m + 64;
+        sDecInst = (s32 *)realloc(sDecInst, (size_t)sDecCap * INST_INTS * sizeof(s32));
+    }
+    /* Back to front, as the sprite pass draws: the front sprite wins. */
+    for (i = m; i-- > 0;) {
+        const RlSprite *s = &f->sprites[r[i].idx];
+        int g = ReliefRoot(r, i), affine = (s->attr0 & 0x100) != 0, fl;
+        u32 shape = (s->attr0 >> 14) & 3, size = (s->attr1 >> 14) & 3;
+        s32 ox, oy, *o;
+
+        if (!gok[g])
+            continue;
+        ox = gslot[g][0] + r[i].x - gbox[g][0];
+        oy = gslot[g][1] + r[i].y - gbox[g][1];
+        fl = (s->attr2 >> 12) & 15;
+        if (s->attr0 & 0x2000) fl |= 16;
+        if (!affine && (s->attr1 & 0x1000)) fl |= 32;
+        if (!affine && (s->attr1 & 0x2000)) fl |= 64;
+        if (affine) fl |= 128;
+        if (f->objOneD) fl |= 4096;
+        o = sDecInst + sDecN * INST_INTS;
+        memset(o, 0, INST_BYTES);
+        o[0] = ox * 256; o[1] = oy * 256; o[2] = r[i].bw; o[3] = r[i].bh;
+        o[4] = kObjW[shape][size]; o[5] = kObjH[shape][size];
+        o[6] = s->attr2 & 0x3FF; o[7] = fl;
+        o[8] = s->pa; o[9] = s->pb; o[10] = s->pc; o[11] = s->pd;
+        sDecN++;
+        sSprSlot[r[i].idx][0] = ox;
+        sSprSlot[r[i].idx][1] = oy;
+        sSprHas[r[i].idx] = 1;
     }
     sRelW = aw;
     sRelH = P.y + P.shelf + RELIEF_GUTTER;
@@ -1401,6 +1510,8 @@ static void RunRelief(void)
 
     G(glActiveTexture)(GL_TEXTURE0 + UNIT_NRM);
     G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_ALB_VIEW);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
     if (!sRelOn)
         return;
     if (!EnsureRelief(sRelW, sRelH)) {
@@ -1454,6 +1565,8 @@ static void RunRelief(void)
         G(glUseProgram)(sProgRel[i]);
         G(glUniform2i)(uRelSize[i], sRelW, sRelH);
         G(glUniform1i)(uRelSprY0[i], sRelSprY0);
+        G(glUniform4f)(uRelGenS[i], kReliefGenSpr[0], kReliefGenSpr[1], kReliefGenSpr[2], kReliefGenSpr[3]);
+        G(glUniform4f)(uRelGenB[i], kReliefGenBg[0], kReliefGenBg[1], kReliefGenBg[2], kReliefGenBg[3]);
         G(glActiveTexture)(GL_TEXTURE0 + UNIT_IN);
         G(glBindTexture)(GL_TEXTURE_2D, in[i]);
         G(glDrawArrays)(GL_TRIANGLES, 0, 3);
@@ -1467,6 +1580,14 @@ static void RunRelief(void)
     G(glBindVertexArray)(0);
 }
 
+/* ?normals=2 reads the art in the composite; never while it is drawn into. */
+static void BindReliefView(const RlFrame *f)
+{
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_ALB_VIEW);
+    G(glBindTexture)(GL_TEXTURE_2D, sRelOn && f->lightNrmView == 2 ? sTexAlb : 0);
+    G(glActiveTexture)(GL_TEXTURE0);
+}
+
 /* The composite's relief uniforms. */
 static void SetRelief(const RlFrame *f)
 {
@@ -1478,9 +1599,12 @@ static void SetRelief(const RlFrame *f)
     if (!sRelOn)
         return;
     G(glUniform4iv)(uCNrmOff, 4, sNrmOff);
-    G(glUniform4f)(uCRelief, f->lightRelief, f->lightShine, 0.45f, f->lightHeight * 80.0f);
+    G(glUniform4f)(uCRelief, f->lightRelief, f->lightShine, 0.0f, f->lightHeight * 80.0f);
+    G(glUniform4fv)(uCRespS, 1, kReliefRespSpr);
+    G(glUniform4fv)(uCRespB, 1, kReliefRespBg);
     G(glUniform3f)(uCSunDir, x / l, y / l, z / l);
     G(glUniform1i)(uCNrmView, f->lightNrmView);
+    G(glUniform1i)(uCSprY0, sRelSprY0);
 }
 
 void GlrDraw(const RlFrame *f)
@@ -1609,6 +1733,7 @@ void GlrDrawScaled(const RlFrame *f, int k)
     G(glActiveTexture)(GL_TEXTURE0 + UNIT_OBJN);
     G(glBindTexture)(GL_TEXTURE_2D, sTexObjN);
     G(glActiveTexture)(GL_TEXTURE0);
+    BindReliefView(f);
     G(glBindVertexArray)(sVaoEmpty);
     G(glDrawArrays)(GL_TRIANGLES, 0, 3);
 

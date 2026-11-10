@@ -394,8 +394,8 @@ static void Attach(RlFrame *f, int roomBg)
         if (e)
             gPortLightParams.relief = (float)atof(e);
         e = getenv("KATAM_RELIEF_VIEW");
-        if (e && e[0] == '1')
-            gPortReliefView = 1;
+        if (e && e[0] >= '1' && e[0] <= '3')
+            gPortReliefView = e[0] - '0';
         sEnvDone = 1;
     }
     li = &gCurLevelInfo[gLocalPlayerId];
