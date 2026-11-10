@@ -1,0 +1,80 @@
+<!-- tools/relief_check/run.sh stages this page; see there. -->
+<!doctype html><meta charset=utf-8><title>relief port vs crate</title>
+<body style="background:#222;color:#ddd;font:14px monospace"><pre id=out></pre><div id=vis></div>
+<script type=module>
+const { S, MARGIN } = await import('./glsl.js?v=' + Date.now());
+const out = document.getElementById('out');
+const log = s => { out.textContent += s + '\n'; };
+const gl = document.createElement('canvas').getContext('webgl2');
+const G = 20;
+function sh(t, s) { const o = gl.createShader(t); gl.shaderSource(o, s); gl.compileShader(o);
+  if (!gl.getShaderParameter(o, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(o)); return o; }
+function prog(fs) { const p = gl.createProgram();
+  gl.attachShader(p, sh(gl.VERTEX_SHADER, '#version 300 es\n' + S.kCommon + S.kCompVs));
+  gl.attachShader(p, sh(gl.FRAGMENT_SHADER, '#version 300 es\n' + S.kCommon + S.kRelCommon + fs));
+  gl.linkProgram(p); if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p)); return p; }
+const P = [S.kRel1Fs, S.kRel2Fs, S.kRel3Fs, S.kRel4Fs, S.kRel5Fs].map(prog);
+function tex(ifmt, fmt, type, w, h, data) { const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texImage2D(gl.TEXTURE_2D, 0, ifmt, w, h, 0, fmt, type, data || null); return t; }
+function fbo(t) { const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  if (gl.checkFramebufferStatus(gl.FRAMEBUFFER) != gl.FRAMEBUFFER_COMPLETE) throw new Error('fbo'); return f; }
+async function pixels(url) { const im = new Image(); im.src = url; await im.decode();
+  const c = document.createElement('canvas'); c.width = im.width; c.height = im.height;
+  const x = c.getContext('2d'); x.drawImage(im, 0, 0); return x.getImageData(0, 0, im.width, im.height); }
+function run(img) {
+  const w = img.width, h = img.height, W = w + 2 * G, H = h + 2 * G;
+  const alb = new Uint8Array(W * H * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < 4; c++)
+    alb[((y + G) * W + x + G) * 4 + c] = img.data[(y * w + x) * 4 + c];
+  const tA = tex(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, W, H, alb);
+  const t1 = tex(gl.RG32UI, gl.RG_INTEGER, gl.UNSIGNED_INT, W, H), t2 = tex(gl.RGBA32UI, gl.RGBA_INTEGER, gl.UNSIGNED_INT, W, H);
+  const t3 = tex(gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, W, H), t4 = tex(gl.R32UI, gl.RED_INTEGER, gl.UNSIGNED_INT, W, H);
+  const tN = tex(gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, W, H);
+  const outs = [t1, t2, t3, t4, tN].map(fbo), ins = [null, t1, t2, t3, t4];
+  gl.viewport(0, 0, W, H);
+  for (let i = 0; i < 5; i++) {
+    gl.bindFramebuffer(gl.FRAMEBUFFER, outs[i]); gl.useProgram(P[i]);
+    gl.uniform2i(gl.getUniformLocation(P[i], 'uSize'), W, H);
+    gl.uniform1i(gl.getUniformLocation(P[i], 'uSprY0'), window.SPRY0 ?? 0);
+    const la = gl.getUniformLocation(P[i], 'uAlb'), li = gl.getUniformLocation(P[i], 'uIn');
+    gl.activeTexture(gl.TEXTURE10); gl.bindTexture(gl.TEXTURE_2D, tA); if (la) gl.uniform1i(la, 10);
+    gl.activeTexture(gl.TEXTURE9); gl.bindTexture(gl.TEXTURE_2D, ins[i]); if (li) gl.uniform1i(li, 9);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+  const res = new Uint8Array(W * H * 4); gl.bindFramebuffer(gl.FRAMEBUFFER, outs[4]);
+  gl.readPixels(0, 0, W, H, gl.RGBA, gl.UNSIGNED_BYTE, res);
+  const e = gl.getError(); if (e) throw new Error('gl error ' + e);
+  const o = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) for (let c = 0; c < 4; c++)
+    o[(y * w + x) * 4 + c] = res[((y + G) * W + x + G) * 4 + c];
+  return o;
+}
+function draw(arrs, w, h, k) { const c = document.createElement('canvas'); c.width = w * k * arrs.length + (arrs.length - 1) * 8; c.height = h * k;
+  const x = c.getContext('2d'); x.imageSmoothingEnabled = false;
+  arrs.forEach((a, i) => { const t = document.createElement('canvas'); t.width = w; t.height = h;
+    t.getContext('2d').putImageData(new ImageData(a, w, h), 0, 0); x.drawImage(t, i * (w * k + 8), 0, w * k, h * k); });
+  return c; }
+const results = {};
+for (const name of ['blob20', 'rock36', 'twoparts', 'big48']) {
+  const img = await pixels(name + '.png'), ref = await pixels(name + '_n.png');
+  const got = run(img);
+  let max = [0, 0, 0], sum = 0, n = 0, over2 = 0, amask = 0;
+  const diff = new Uint8ClampedArray(got.length);
+  for (let i = 0; i < img.width * img.height; i++) {
+    if ((img.data[i * 4 + 3] > 8) != (got[i * 4 + 3] > 127)) amask++;
+    diff[i * 4 + 3] = 255;
+    if (img.data[i * 4 + 3] <= 8) continue;
+    let worst = 0;
+    for (let c = 0; c < 3; c++) { const d = Math.abs(got[i * 4 + c] - ref.data[i * 4 + c]); max[c] = Math.max(max[c], d); sum += d; worst = Math.max(worst, d); }
+    for (let c = 0; c < 3; c++) diff[i * 4 + c] = Math.min(255, worst * 25);
+    n++; if (worst > 2) over2++;
+  }
+  results[name] = { w: img.width, h: img.height, opaque: n, maxDiff: max, meanAbs: +(sum / (3 * n)).toFixed(3), pixelsOver2: over2, alphaMismatch: amask };
+  log(name + ' ' + JSON.stringify(results[name]));
+  const lbl = document.createElement('div'); lbl.textContent = name + ': sprite | crate (Rust CLI) | GPU port | |difference| x25';
+  document.getElementById('vis').append(lbl, draw([img.data, ref.data, got, diff], img.width, img.height, 8));
+}
+window.__results = results;
+</script>

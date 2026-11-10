@@ -19,9 +19,13 @@
  * most 1950 bytes.  The GL composite samples it bilinearly in world
  * coordinates (stable while the camera moves): shade darker and cooler,
  * lit areas warmer, the point lights' halo; the playfield fully, the
- * parallax art behind it at 55%; never the HUD.  Outside the world
- * framing, or outside Rainbow Route, the frame carries no light map and the
- * composite is the old one.  The PPU (software) path is not touched.
+ * parallax art behind it at 55%; never the HUD.  With relief on (the
+ * default), every sprite and layer pixel also has a normal, made each frame
+ * on the GPU from the art itself (render/relief_glsl.h, a port of Sprite
+ * Normals), and the sun or the lights shade it: slopes facing the light
+ * brighter, turned away darker, flat art unchanged, none of it in shadow.
+ * Outside the world framing, or outside Rainbow Route, the frame carries no
+ * light map and the composite is the old one.  The PPU (software) path is not touched.
  *
  * Runs at present time, outside the simulation, and only reads game memory.
  */
@@ -56,6 +60,7 @@ int gPortLightingDefault = -1;   /* page / env default; -1 read KATAM_LIGHTING *
 int gPortLightingUser = -1;      /* the settings menu; -1 follow the default  */
 PortLightParams gPortLightParams = PORT_LIGHT_PARAMS_DEFAULT;
 double gPortLightBuildMs;        /* the last light-map build, for the report  */
+int gPortReliefView;             /* show the normal maps                      */
 
 void PortLightResolve(void)
 {
@@ -385,6 +390,12 @@ static void Attach(RlFrame *f, int roomBg)
         e = getenv("KATAM_LIGHTING_MODE");
         if (e)
             gPortLightParams.mode = (e[0] == 'p') ? RL_LIGHT_POINT : RL_LIGHT_SUN;
+        e = getenv("KATAM_LIGHTING_RELIEF");
+        if (e)
+            gPortLightParams.relief = (float)atof(e);
+        e = getenv("KATAM_RELIEF_VIEW");
+        if (e && e[0] == '1')
+            gPortReliefView = 1;
         sEnvDone = 1;
     }
     li = &gCurLevelInfo[gLocalPlayerId];
@@ -445,6 +456,11 @@ static void Attach(RlFrame *f, int roomBg)
     f->lightWarm = gPortLightParams.warmth;
     f->lightCool = gPortLightParams.cool;
     f->lightGlow = gPortLightParams.glow;
+    f->lightRelief = gPortLightParams.relief;
+    f->lightShine = gPortLightParams.shine;
+    f->lightHeight = gPortLightParams.height;
+    f->lightAngle = gPortLightParams.angle;
+    f->lightNrmView = (u8)gPortReliefView;
     f->numLights = (u8)sNumLights;
     for (i = 0; i < sNumLights; i++) {
         f->lights[i][0] = sLights[i][0];

@@ -1,0 +1,22 @@
+Sprite Normals (MIT, see LICENSE), Copyright (c) 2026 Hugo Duprez.
+https://github.com/Hugo-Dz/spritefusion-sprite-normals
+at d14b06726cabab09c68a403ce2e684a52efbfe4c.
+
+No source file from it is vendored. The generator in its src/relief.rs,
+src/field.rs, src/distance.rs and src/color.rs is ported, step for step, to the
+GLSL passes in platform/render/relief_glsl.h. The port runs on the GPU every
+frame, because the game's art only exists once the ROM has been decoded into
+VRAM; the crate's PNG/GIF front end and its CLI and wasm wrappers are not used.
+
+Where the port differs from the crate:
+
+- The distance to the silhouette is exact up to RELIEF_R pixels and capped
+  there, instead of unbounded. The crate's shape term grows as ln(1 + d / 4)
+  for ever; past 12 px its slope is under a quarter of its edge slope.
+- Islands (8-connected components) are not split out. The crate processes
+  them one at a time, but that only re-centres the lightness, and its
+  normalised blur makes that a no-op.
+- Intermediates are half floats.
+- The defaults are the crate's own: normal strength 1.5, detail strength 6,
+  detail scale 0.6, shape strength 1.15, shape radius 4, softness 1.15,
+  alpha threshold 0.03, OpenGL green channel.

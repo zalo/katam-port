@@ -92,6 +92,10 @@ typedef ptrdiff_t GLintptr;
 #define GL_LINEAR 0x2601
 #define GL_RG8 0x822B
 #define GL_RG 0x8227
+#define GL_R32UI 0x8236
+#define GL_RG32UI 0x823C
+#define GL_RGBA32UI 0x8D70
+#define GL_RG_INTEGER 0x8228
 #define GL_ONE 1
 #define GL_SRC_ALPHA 0x0302
 #define GL_ONE_MINUS_SRC_ALPHA 0x0303
@@ -125,6 +129,8 @@ typedef ptrdiff_t GLintptr;
     X(GLenum, glCheckFramebufferStatus, (GLenum)) \
     X(void, glReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) \
     X(void, glClearBufferuiv, (GLenum, GLint, const GLuint *)) \
+    X(void, glClearBufferfv, (GLenum, GLint, const GLfloat *)) \
+    X(void, glDrawBuffers, (GLsizei, const GLenum *)) \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
     X(GLuint, glCreateShader, (GLenum)) \
     X(void, glShaderSource, (GLuint, GLsizei, const GLchar *const *, const GLint *)) \
@@ -148,6 +154,7 @@ typedef ptrdiff_t GLintptr;
     X(void, glUniform1f, (GLint, GLfloat)) \
     X(void, glUniform2f, (GLint, GLfloat, GLfloat)) \
     X(void, glUniform2fv, (GLint, GLsizei, const GLfloat *)) \
+    X(void, glUniform3f, (GLint, GLfloat, GLfloat, GLfloat)) \
     X(void, glUniform4f, (GLint, GLfloat, GLfloat, GLfloat, GLfloat)) \
     X(void, glGenBuffers, (GLsizei, GLuint *)) \
     X(void, glBindBuffer, (GLenum, GLuint)) \

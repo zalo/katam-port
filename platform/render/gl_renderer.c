@@ -44,10 +44,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "port/port.h"
 #include "render/gl_api.h"
 #include "render/gl_renderer.h"
+#include "render/relief_glsl.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -90,6 +92,8 @@ static int sMaxTex = 2048;
 
 static s32 *sInst;
 static int sInstCap;
+#define INST_INTS 16            /* per sprite instance: aA aB aC aD           */
+#define INST_BYTES (INST_INTS * 4)
 
 static int sLastW = 240, sLastH = 160;
 static int sLastDst[4];
@@ -129,6 +133,31 @@ static int sLightW, sLightH;
 static u32 sLightGen;
 static const u8 *sLightPtr;
 
+/* Relief (relief_glsl.h): the sprite pass's normal target, the atlas the
+ * art is drawn into and the passes' targets, the same size.  Texture units:
+ * 7 the normal atlas, 8 the sprite normals, 9 and 10 the passes' inputs. */
+#define UNIT_NRM 7
+#define UNIT_OBJN 8
+#define UNIT_IN 9
+#define UNIT_ALB 10
+static GLuint sTexObjN;
+static GLuint sProgObjDec, sProgRel[5];
+static GLint uRelSize[5], uRelSprY0[5], uDecView, uDecK, uDecWin;
+static GLint uCDecode, uCNrm, uCNrmOff, uCRelief, uCSunDir, uCNrmView;
+static GLuint sTexAlb, sTexT1, sTexT2, sTexT3, sTexT4, sTexNrm;
+static GLuint sFboAlb, sFboT1, sFboT2, sFboT3, sFboT4, sFboNrm;
+static int sRelTexW, sRelTexH;   /* allocated                                */
+static int sRelOk;               /* the passes compiled                      */
+static int sRelOn;               /* this frame has normals                   */
+static int sRelW, sRelH;         /* this frame's part of the atlas           */
+static int sRelSprY0;            /* sprites from this row down               */
+static GLint sNrmOff[16];        /* uNrmOff                                  */
+static int sRelBg[4][4];         /* per BG: atlas x y w h, w 0 none          */
+static s32 sSprSlot[RL_MAX_SPRITES][2];
+static u8 sSprHas[RL_MAX_SPRITES];
+static s32 *sDecInst;
+static int sDecN, sDecCap;
+
 /* --- shaders ------------------------------------------------------------- */
 
 static const char *kCommon =
@@ -145,11 +174,13 @@ static const char *kObjVs =
     "layout(location = 0) in ivec4 aA;\n"   /* x y (view, 1/256 px) boxW boxH */
     "layout(location = 1) in ivec4 aB;\n"   /* w h tile flags            */
     "layout(location = 2) in ivec4 aC;\n"   /* pa pb pc pd               */
+    "layout(location = 3) in ivec4 aD;\n"   /* relief atlas x y, has, -  */
     "uniform ivec2 uViewSize;\n"            /* the target, pixels         */
     "uniform int uK;\n"                     /* target pixels per game px  */
     "flat out ivec4 vA;\n"
     "flat out ivec4 vB;\n"
     "flat out ivec4 vC;\n"
+    "flat out ivec4 vD;\n"
     "void main() {\n"
     "  int c = gl_VertexID;\n"
     "  vec2 corner = vec2(float(c & 1), float(c >> 1));\n"
@@ -159,18 +190,32 @@ static const char *kObjVs =
     "  vec2 hi = (vec2(aA.xy) / 256.0 + vec2(aA.zw)) * float(uK) + 1.0;\n"
     "  vec2 p = mix(floor(lo), ceil(hi), corner);\n"
     "  gl_Position = vec4(p / vec2(uViewSize) * 2.0 - 1.0, 0.0, 1.0);\n"
-    "  vA = aA; vB = aB; vC = aC;\n"
+    "  vA = aA; vB = aB; vC = aC; vD = aD;\n"
     "}\n";
 
 /* flags: 0-3 palette bank, 4 8bpp, 5 hflip, 6 vflip, 7 affine, 8-9
- * priority, 10 semi-transparent, 12 1D mapping. */
+ * priority, 10 semi-transparent, 12 1D mapping.
+ *
+ * Two programs from this source.  The sprite pass: the colour target, and a
+ * second, RGBA8 one with the sprite's normal (relief_glsl.h) turned by its
+ * flips or affine matrix, or a flat normal with alpha 0 where it has none.
+ * With RELIEF_DECODE: the sprite's own colours, opaque, into the relief
+ * atlas (the instance is placed there unflipped and unrotated). */
 static const char *kObjFs =
     "flat in ivec4 vA;\n"
     "flat in ivec4 vB;\n"
     "flat in ivec4 vC;\n"
+    "flat in ivec4 vD;\n"
     "uniform int uWinPass;\n"
     "uniform int uK;\n"
-    "out uvec4 oObj;\n"
+    "#ifdef RELIEF_DECODE\n"
+    "out vec4 oAlb;\n"
+    "#else\n"
+    "precision highp sampler2D;\n"
+    "uniform sampler2D uNrmAtlas;\n"
+    "layout(location = 0) out uvec4 oObj;\n"
+    "layout(location = 1) out vec4 oNrm;\n"
+    "#endif\n"
     "void main() {\n"
     /* This pixel's centre in view coordinates, 1/256 px, and the sprite
      * texel under it. */
@@ -208,9 +253,33 @@ static const char *kObjFs =
     "    if (idx == 0) discard;\n"
     "    col = pal(256 + (((fl & 15) * 16 + idx) & 255));\n"
     "  }\n"
+    "#ifdef RELIEF_DECODE\n"
+    "  int r = col & 31, g = (col >> 5) & 31, b = (col >> 10) & 31;\n"
+    "  oAlb = vec4(vec3(float((r << 3) | (r >> 2)), float((g << 3) | (g >> 2)),\n"
+    "                   float((b << 3) | (b >> 2))) / 255.0, 1.0);\n"
+    "#else\n"
+    "  oNrm = vec4(0.5, 0.5, 1.0, 0.0);\n"
     "  if (uWinPass != 0) { oObj = uvec4(1u); return; }\n"
     "  oObj = uvec4(uint(col & 255), uint(col >> 8),\n"
     "               uint(((fl >> 8) & 3) | (((fl >> 10) & 1) << 2) | 8 | (((fl >> 13) & 1) << 4)), 0u);\n"
+    "  if (vD.z != 0) {\n"
+    /* The map is the unflipped sprite's.  n ~ (-gx, gy, 1) * s for the
+     * height's gradient g in image rows (lib.rs); the screen's gradient is
+     * the texture's through the flip, or through the affine matrix's
+     * transpose (texel = M * screen offset). */
+    "    vec3 n = texelFetch(uNrmAtlas, vD.xy + ivec2(texX, texY), 0).xyz * 2.0 - 1.0;\n"
+    "    if ((fl & 128) != 0) {\n"
+    "      vec2 g = vec2(-n.x, n.y) / max(n.z, 0.05);\n"
+    "      vec2 gs = vec2(float(vC.x) * g.x + float(vC.z) * g.y,\n"
+    "                     float(vC.y) * g.x + float(vC.w) * g.y) / 256.0;\n"
+    "      n = vec3(-gs.x, gs.y, 1.0);\n"
+    "    } else {\n"
+    "      if ((fl & 32) != 0) n.x = -n.x;\n"
+    "      if ((fl & 64) != 0) n.y = -n.y;\n"
+    "    }\n"
+    "    oNrm = vec4(normalize(n) * 0.5 + 0.5, 1.0);\n"
+    "  }\n"
+    "#endif\n"
     "}\n";
 
 static const char *kCompVs =
@@ -245,6 +314,17 @@ static const char *kCompFs =
     "uniform int uNumLights;\n"
     "uniform vec4 uLightP;\n"       /* shadow darkness, warmth, cool, glow */
     "uniform int uLightMode;\n"     /* 0 sun, 1 point lights              */
+    /* Relief (relief_glsl.h): normal maps for the lighting.  uDecode.x >= 0:
+     * this draw is not the composite but BG uDecode.x's colours into the
+     * relief atlas, at atlas = layer coords + uNrmOff[bg].xy. */
+    "uniform ivec4 uDecode;\n"
+    "uniform int uNrm;\n"
+    "uniform ivec4 uNrmOff[4];\n"   /* atlas - layer coords, has, -       */
+    "uniform highp sampler2D uNrmAtlas;\n"
+    "uniform highp sampler2D uObjN;\n"
+    "uniform vec4 uRelief;\n"      /* strength, shine, ambient, light z  */
+    "uniform vec3 uSunDir;\n"      /* towards the sun, +y up             */
+    "uniform int uNrmView;\n"      /* 1: show the normals                */
     "out vec4 oColor;\n"
     "int L(int line, int w) {\n"
     "  ivec4 t = texelFetch(uLines, ivec2(w >> 2, line), 0);\n"
@@ -382,6 +462,16 @@ static const char *kCompFs =
     "  return vec4(float(r), float(g), float(b), 255.0) / 255.0;\n"
     "}\n"
     "void main() {\n"
+    "  if (uDecode.x >= 0) {\n"
+    "    int bg = uDecode.x;\n"
+    "    ivec2 t = ivec2(gl_FragCoord.xy) - uNrmOff[bg].xy;\n"
+    "    int rl = clamp(t.y - (uLayer[bg].w >> 8), 0, 159);\n"
+    "    int md = L(rl, 16) & 7, c = -1;\n"
+    "    if (md == 0 || (md == 1 && bg < 2)) c = sampleText(bg, t.x, t.y, rl);\n"
+    "    else if ((md == 1 && bg == 2) || (md == 2 && bg >= 2)) c = sampleAffine(bg, t.x, t.y, rl);\n"
+    "    oColor = c < 0 ? vec4(0.0) : vec4(toRgba(c).rgb, 1.0);\n"
+    "    return;\n"
+    "  }\n"
     /* h: the target pixel.  v: the view pixel it lies in (the HUD's grid).
      * b: its centre in SCREEN coordinates, 1/256 px -- the world's grid.
      * The HUD pass draws at k = 1 with no fraction (GlrDrawScaled). */
@@ -397,9 +487,10 @@ static const char *kCompFs =
     "  int dispcnt = L(rl, 16);\n"
     "  if ((dispcnt & 0x80) != 0) { oColor = hudPass ? vec4(0.0) : vec4(1.0); return; }\n"
     "  int mode = dispcnt & 7;\n"
-    "  int lc[4]; int lp[4];\n"
+    "  int lc[4]; int lp[4]; ivec2 lxy[4];\n"
     "  for (int bg = 0; bg < 4; bg++) {\n"
     "    lc[bg] = -1;\n"
+    "    lxy[bg] = ivec2(0);\n"
     "    lp[bg] = L(rl, 27 + bg) & 3;\n"
     "    if ((dispcnt & (0x100 << bg)) == 0) continue;\n"
     "    if (uLayer[bg].x < 0 || (letterbox && uLayer[bg].x != 2)) continue;\n"
@@ -420,6 +511,7 @@ static const char *kCompFs =
     "      }\n"
     "      if (!found) continue;\n"
     "    }\n"
+    "    lxy[bg] = ivec2(x, y);\n"
     "    if (mode == 0 || (mode == 1 && bg < 2)) lc[bg] = sampleText(bg, x, y, rl);\n"
     "    else if ((mode == 1 && bg == 2) || (mode == 2 && bg >= 2)) lc[bg] = sampleAffine(bg, x, y, rl);\n"
     "  }\n"
@@ -491,6 +583,40 @@ static const char *kCompFs =
     /* The playfield (the room layer, sprites) takes the full shade; the
      * parallax art behind it, far off, 55% of it. */
     "      float plane = (top == 4 || (top >= 0 && ((uLight >> top) & 1) != 0)) ? 1.0 : 0.55;\n"
+    /* Relief: the top pixel's normal (its sprite's, or its layer's) lit by
+     * the sun or the room's lights, against what a flat pixel gets, so flat
+     * art keeps its colours and only slopes change -- lit where they face
+     * the light, darker where they turn away, with a small highlight.  None
+     * of it in shade, where no direct light arrives. */
+    "      if (uNrm != 0) {\n"
+    "        vec4 nt = vec4(0.0);\n"
+    "        if (top == 4) nt = texelFetch(uObjN, h, 0);\n"
+    "        else if (top >= 0 && uNrmOff[top].z != 0) nt = texelFetch(uNrmAtlas, lxy[top] + uNrmOff[top].xy, 0);\n"
+    "        if (uNrmView != 0) { oColor = vec4(nt.a > 0.5 ? nt.rgb : vec3(0.15, 0.15, 0.3), 1.0); return; }\n"
+    "        if (nt.a > 0.5) {\n"
+    "          vec3 N = normalize(nt.xyz * 2.0 - 1.0), Ld = uSunDir;\n"
+    "          float lit = 1.0 - sl.r;\n"
+    "          if (uLightMode == 1) {\n"
+    "            vec3 acc = vec3(0.0);\n"
+    "            for (int i = 0; i < 4; i++) {\n"
+    "              if (i >= uNumLights) break;\n"
+    "              vec2 d = uLights[i] - wp;\n"
+    "              float att = max(1.0 - length(d) / 560.0, 0.0);\n"
+    "              acc += att * att * normalize(vec3(d.x, -d.y, uRelief.w));\n"
+    "            }\n"
+    "            Ld = length(acc) > 1e-4 ? normalize(acc) : vec3(0.0, 0.0, 1.0);\n"
+    "            lit = clamp(sl.g * 2.0, 0.0, 1.0);\n"
+    "          }\n"
+    "          float amb = uRelief.z;\n"
+    "          float d0 = amb + (1.0 - amb) * max(Ld.z, 0.0);\n"
+    "          float d1 = amb + (1.0 - amb) * max(dot(N, Ld), 0.0);\n"
+    "          float w = clamp(K * uRelief.x * lit * plane, 0.0, 2.0);\n"
+    "          col *= max(mix(1.0, d1 / max(d0, 1e-3), w), 0.0);\n"
+    "          vec3 Hv = normalize(Ld + vec3(0.0, 0.0, 1.0));\n"
+    "          float sp = max(pow(max(dot(N, Hv), 0.0), 20.0) - pow(Hv.z, 20.0), 0.0);\n"
+    "          col += K * uRelief.y * lit * plane * sp * vec3(1.0, 0.92, 0.75);\n"
+    "        }\n"
+    "      }\n"
     "      col *= max(mix(vec3(1.0), shadeC, K * sl.r * plane), vec3(0.1));\n"
     /* Warmth where the light arrives.  Sun: fading from the upper left of
      * the view, and less on pale pixels so a white sky is not washed out. */
@@ -545,16 +671,17 @@ static const char *kHudFs =
     "  oColor = texture(uHud, (i + 0.5 + f) / uTexSize);\n"
     "}\n";
 
-static GLuint Compile(GLenum type, const char *body, const char *what)
+static GLuint Compile(GLenum type, const char *extra, const char *body, const char *what)
 {
-    const char *srcs[3];
+    const char *srcs[4];
     GLuint sh = G(glCreateShader)(type);
     GLint ok = 0;
 
     srcs[0] = sEs ? "#version 300 es\n" : "#version 330 core\n";
     srcs[1] = kCommon;
-    srcs[2] = body;
-    G(glShaderSource)(sh, 3, srcs, NULL);
+    srcs[2] = extra ? extra : "";
+    srcs[3] = body;
+    G(glShaderSource)(sh, 4, srcs, NULL);
     G(glCompileShader)(sh);
     G(glGetShaderiv)(sh, GL_COMPILE_STATUS, &ok);
     if (!ok) {
@@ -567,10 +694,11 @@ static GLuint Compile(GLenum type, const char *body, const char *what)
     return sh;
 }
 
-static GLuint Link(const char *vs, const char *fs, const char *what)
+/* extra: put before the fragment shader's body (a #define, shared code). */
+static GLuint LinkX(const char *vs, const char *extra, const char *fs, const char *what)
 {
-    GLuint v = Compile(GL_VERTEX_SHADER, vs, what);
-    GLuint f = Compile(GL_FRAGMENT_SHADER, fs, what);
+    GLuint v = Compile(GL_VERTEX_SHADER, NULL, vs, what);
+    GLuint f = Compile(GL_FRAGMENT_SHADER, extra, fs, what);
     GLuint p;
     GLint ok = 0;
 
@@ -590,6 +718,11 @@ static GLuint Link(const char *vs, const char *fs, const char *what)
         return 0;
     }
     return p;
+}
+
+static GLuint Link(const char *vs, const char *fs, const char *what)
+{
+    return LinkX(vs, NULL, fs, what);
 }
 
 static GLuint MakeTex(GLenum ifmt, GLenum fmt, GLenum type, int w, int h)
@@ -647,10 +780,49 @@ int GlrInit(void *(*getProc)(const char *), int es)
     sProgHud = Link(kHudVs, kHudFs, "hud");
     if (!sProgObj || !sProgComp || !sProgHud)
         return 0;
+    {
+        /* Relief: without it the lighting is the flat one; nothing else
+         * depends on these. */
+        const char *fs[5];
+        int i;
+
+        fs[0] = kRel1Fs; fs[1] = kRel2Fs; fs[2] = kRel3Fs; fs[3] = kRel4Fs; fs[4] = kRel5Fs;
+        sProgObjDec = LinkX(kObjVs, "#define RELIEF_DECODE 1\n", kObjFs, "relief decode");
+        sRelOk = sProgObjDec != 0;
+        for (i = 0; i < 5 && sRelOk; i++) {
+            sProgRel[i] = LinkX(kCompVs, kRelCommon, fs[i], "relief");
+            if (!sProgRel[i]) {
+                sRelOk = 0;
+                break;
+            }
+            G(glUseProgram)(sProgRel[i]);
+            uRelSize[i] = G(glGetUniformLocation)(sProgRel[i], "uSize");
+            uRelSprY0[i] = G(glGetUniformLocation)(sProgRel[i], "uSprY0");
+            {
+                GLint a = G(glGetUniformLocation)(sProgRel[i], "uAlb");
+                GLint b = G(glGetUniformLocation)(sProgRel[i], "uIn");
+                if (a >= 0) G(glUniform1i)(a, UNIT_ALB);
+                if (b >= 0) G(glUniform1i)(b, UNIT_IN);
+            }
+        }
+        if (sRelOk) {
+            SetSamplers(sProgObjDec);
+            uDecView = G(glGetUniformLocation)(sProgObjDec, "uViewSize");
+            uDecK = G(glGetUniformLocation)(sProgObjDec, "uK");
+            uDecWin = G(glGetUniformLocation)(sProgObjDec, "uWinPass");
+        } else {
+            PortLog("[katam-port] gpu: relief (normal maps) unavailable; lighting stays flat");
+        }
+    }
     SetSamplers(sProgObj);
     uObjView = G(glGetUniformLocation)(sProgObj, "uViewSize");
     uObjWinPass = G(glGetUniformLocation)(sProgObj, "uWinPass");
     uObjK = G(glGetUniformLocation)(sProgObj, "uK");
+    {
+        GLint loc = G(glGetUniformLocation)(sProgObj, "uNrmAtlas");
+        if (loc >= 0)
+            G(glUniform1i)(loc, UNIT_NRM);
+    }
     SetSamplers(sProgComp);
     uCView = G(glGetUniformLocation)(sProgComp, "uView");
     uCSub = G(glGetUniformLocation)(sProgComp, "uSub");
@@ -672,10 +844,24 @@ int GlrInit(void *(*getProc)(const char *), int es)
     uCNumLights = G(glGetUniformLocation)(sProgComp, "uNumLights");
     uCLightP = G(glGetUniformLocation)(sProgComp, "uLightP");
     uCLightMode = G(glGetUniformLocation)(sProgComp, "uLightMode");
+    uCDecode = G(glGetUniformLocation)(sProgComp, "uDecode");
+    uCNrm = G(glGetUniformLocation)(sProgComp, "uNrm");
+    uCNrmOff = G(glGetUniformLocation)(sProgComp, "uNrmOff");
+    uCRelief = G(glGetUniformLocation)(sProgComp, "uRelief");
+    uCSunDir = G(glGetUniformLocation)(sProgComp, "uSunDir");
+    uCNrmView = G(glGetUniformLocation)(sProgComp, "uNrmView");
     {
         GLint loc = G(glGetUniformLocation)(sProgComp, "uShadow");
         if (loc >= 0)
             G(glUniform1i)(loc, 6);
+        loc = G(glGetUniformLocation)(sProgComp, "uNrmAtlas");
+        if (loc >= 0)
+            G(glUniform1i)(loc, UNIT_NRM);
+        loc = G(glGetUniformLocation)(sProgComp, "uObjN");
+        if (loc >= 0)
+            G(glUniform1i)(loc, UNIT_OBJN);
+        G(glUniform4i)(uCDecode, -1, 0, 0, 0);
+        G(glUniform1i)(uCNrm, 0);
     }
     G(glUseProgram)(sProgHud);
     G(glUniform1i)(G(glGetUniformLocation)(sProgHud, "uHud"), 0);
@@ -700,9 +886,9 @@ int GlrInit(void *(*getProc)(const char *), int es)
     G(glBindBuffer)(GL_ARRAY_BUFFER, sInstBuf);
     {
         int a;
-        for (a = 0; a < 3; a++) {
+        for (a = 0; a < 4; a++) {
             G(glEnableVertexAttribArray)((GLuint)a);
-            G(glVertexAttribIPointer)((GLuint)a, 4, GL_INT, 48, (const void *)(uintptr_t)(a * 16));
+            G(glVertexAttribIPointer)((GLuint)a, 4, GL_INT, INST_BYTES, (const void *)(uintptr_t)(a * 16));
             G(glVertexAttribDivisor)((GLuint)a, 1);
         }
     }
@@ -729,13 +915,22 @@ static void EnsureTargets(int w, int h)
         G(glDeleteTextures)(1, &sTexObj);
         G(glDeleteTextures)(1, &sTexObjWin);
         G(glDeleteTextures)(1, &sTexComp);
+        G(glDeleteTextures)(1, &sTexObjN);
     }
+    sTexObjN = MakeTex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
     sTexObj = MakeTex(GL_RGBA8UI, GL_RGBA_INTEGER, GL_UNSIGNED_BYTE, w, h);
     sTexObjWin = MakeTex(GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE, w, h);
     sTexComp = MakeTex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
     G(glGenFramebuffers)(1, &sFboObj);
     G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboObj);
     G(glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sTexObj, 0);
+    G(glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0 + 1, GL_TEXTURE_2D, sTexObjN, 0);
+    {
+        static const GLenum kBufs[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT0 + 1 };
+        G(glDrawBuffers)(2, kBufs);
+    }
+    if (G(glCheckFramebufferStatus)(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        PortError("[katam-port] gpu: sprite target incomplete");
     G(glGenFramebuffers)(1, &sFboObjWin);
     G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboObjWin);
     G(glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sTexObjWin, 0);
@@ -837,16 +1032,17 @@ static const u8 kObjH[4][4] = { {8,16,32,64}, {8,8,16,32}, {16,32,32,64}, {8,8,8
 #define SPR_WORLD 1             /* everything but the HUD                     */
 #define SPR_HUD   2             /* the HUD only, into the HUD atlas           */
 
-/* Fill the instance buffer back to front; returns the count. */
+/* Fill the instance buffer back to front; returns the count.  relief: give
+ * each sprite its place in the normal atlas (PlanRelief), if it has one. */
 static int BuildInstances(const RlFrame *f, u32 from, u32 count, int which,
-                          int tw, int th)
+                          int tw, int th, int relief)
 {
     int n = 0;
     u32 i;
 
     if ((int)count > sInstCap) {
         sInstCap = (int)count + 256;
-        sInst = (s32 *)realloc(sInst, (size_t)sInstCap * 12 * sizeof(s32));
+        sInst = (s32 *)realloc(sInst, (size_t)sInstCap * INST_INTS * sizeof(s32));
     }
     for (i = count; i-- > 0;) {
         const RlSprite *s = &f->sprites[from + i];
@@ -855,7 +1051,7 @@ static int BuildInstances(const RlFrame *f, u32 from, u32 count, int which,
         int affine = (s->attr0 & 0x100) != 0;
         int dbl = affine && (s->attr0 & 0x200);
         s32 bw = w << dbl, bh = h << dbl, x, y;   /* x, y: 1/256 px */
-        s32 *o = sInst + n * 12;
+        s32 *o = sInst + n * INST_INTS;
         int flags;
 
         if ((which == SPR_HUD) != (s->space == RL_SPACE_HUD) && which != SPR_ALL)
@@ -884,6 +1080,12 @@ static int BuildInstances(const RlFrame *f, u32 from, u32 count, int which,
         o[0] = x; o[1] = y; o[2] = bw; o[3] = bh;
         o[4] = w; o[5] = h; o[6] = s->attr2 & 0x3FF; o[7] = flags;
         o[8] = s->pa; o[9] = s->pb; o[10] = s->pc; o[11] = s->pd;
+        o[12] = o[13] = o[14] = o[15] = 0;
+        if (relief && from + i < RL_MAX_SPRITES && sSprHas[from + i]) {
+            o[12] = sSprSlot[from + i][0];
+            o[13] = sSprSlot[from + i][1];
+            o[14] = 1;
+        }
         n++;
     }
     return n;
@@ -893,12 +1095,16 @@ static void DrawSprites(const RlFrame *f, GLuint fbo, u32 from, u32 count, int w
                         int which, int tw, int th, int k)
 {
     static const GLuint kZero[4] = { 0, 0, 0, 0 };
+    static const GLfloat kFlat[4] = { 0.5f, 0.5f, 1.0f, 0.0f };
     int n;
 
     G(glBindFramebuffer)(GL_FRAMEBUFFER, fbo);
     G(glViewport)(0, 0, tw * k, th * k);
     G(glClearBufferuiv)(GL_COLOR, 0, kZero);
-    n = BuildInstances(f, from, count, which, tw, th);
+    if (fbo == sFboObj)
+        G(glClearBufferfv)(GL_COLOR, 1, kFlat);
+    n = BuildInstances(f, from, count, which, tw, th,
+                       sRelOn && fbo == sFboObj && !winPass);
     if (n == 0)
         return;
     G(glUseProgram)(sProgObj);
@@ -907,7 +1113,7 @@ static void DrawSprites(const RlFrame *f, GLuint fbo, u32 from, u32 count, int w
     G(glUniform1i)(uObjWinPass, winPass);
     G(glBindVertexArray)(sVaoObj);
     G(glBindBuffer)(GL_ARRAY_BUFFER, sInstBuf);
-    G(glBufferData)(GL_ARRAY_BUFFER, (GLsizeiptr)n * 48, sInst, GL_STREAM_DRAW);
+    G(glBufferData)(GL_ARRAY_BUFFER, (GLsizeiptr)n * INST_BYTES, sInst, GL_STREAM_DRAW);
     G(glDrawArraysInstanced)(GL_TRIANGLE_STRIP, 0, 4, n);
     G(glBindVertexArray)(0);
 }
@@ -979,6 +1185,304 @@ static void UploadLight(const RlFrame *f)
     G(glUniform1i)(uCLightMode, f->lightMode);
 }
 
+/* --- relief: normal maps for the lighting (relief_glsl.h) -----------------
+ *
+ * Only for a lit world frame (f->light, light.c) with relief on.  Per frame:
+ * PlanRelief packs, on shelves with transparent gutters, every enabled
+ * non-HUD background layer's piece around the view (the view's layer
+ * coordinates plus RELIEF_MARGIN all round) and every distinct on-screen
+ * world sprite (tile, size, palette, depth: one place for a crowd of the
+ * same enemy); RunRelief draws them -- the layers through the composite
+ * program's decode branch, the sprites unflipped through the decode sprite
+ * program -- and runs the five passes over that part of the atlas.  The
+ * sprite pass then reads each sprite's normal from its place, and the
+ * composite each layer's at its layer coordinates plus uNrmOff. */
+
+static s32 FloorDiv256(s32 v)
+{
+    return v >= 0 ? v / 256 : -((-v + 255) / 256);
+}
+
+typedef struct ReliefPacker {
+    int x, y, shelf, w;
+} ReliefPacker;
+
+static int ReliefPlace(ReliefPacker *P, int w, int h, int *ox, int *oy)
+{
+    if (w + 2 * RELIEF_GUTTER > P->w)
+        return 0;
+    if (P->x + w + RELIEF_GUTTER > P->w) {
+        P->y += P->shelf + RELIEF_GUTTER;
+        P->x = RELIEF_GUTTER;
+        P->shelf = 0;
+    }
+    if (P->y + h + RELIEF_GUTTER > sMaxTex)
+        return 0;
+    *ox = P->x;
+    *oy = P->y;
+    P->x += w + RELIEF_GUTTER;
+    if (h > P->shelf)
+        P->shelf = h;
+    return 1;
+}
+
+#define RELIEF_HASH 2048        /* > RL_MAX_SPRITES: probing always ends     */
+
+static void PlanRelief(const RlFrame *f)
+{
+    static u32 keys[RELIEF_HASH];
+    static s32 slot[RELIEF_HASH][2];
+    static u8 slotOk[RELIEF_HASH];
+    ReliefPacker P;
+    int bg, aw, rw, rh, n = (int)f->numSprites;
+    int i;
+
+    sRelOn = 0;
+    sDecN = 0;
+    if (n > RL_MAX_SPRITES)
+        n = RL_MAX_SPRITES;
+    memset(sSprHas, 0, (size_t)n);
+    memset(sRelBg, 0, sizeof(sRelBg));
+    memset(sNrmOff, 0, sizeof(sNrmOff));
+    if (!sRelOk || !f->light || !(f->lightRelief > 0.0f) || !f->world)
+        return;
+    rw = f->viewW + 1 + 2 * RELIEF_MARGIN;
+    rh = f->viewH + 1 + 2 * RELIEF_MARGIN;
+    aw = 1024;
+    if (rw + 2 * RELIEF_GUTTER > aw)
+        aw = (rw + 2 * RELIEF_GUTTER + 63) & ~63;
+    if (aw > sMaxTex)
+        return;
+    P.x = P.y = RELIEF_GUTTER;
+    P.shelf = 0;
+    P.w = aw;
+
+    for (bg = 0; bg < 4; bg++) {
+        const RlTileLayer *L = &f->layers[bg];
+        int ax, ay;
+        s32 lx0, ly0;
+
+        if (!L->enabled || L->space == RL_SPACE_HUD || !ReliefPlace(&P, rw, rh, &ax, &ay))
+            continue;
+        /* The composite's layer coordinate is (screen * 256 + shift) >> 8. */
+        lx0 = FloorDiv256(f->viewX * 256 + f->viewSubX + L->shiftX * 256 + L->subX) - RELIEF_MARGIN;
+        ly0 = FloorDiv256(f->viewY * 256 + f->viewSubY + L->shiftY * 256 + L->subY) - RELIEF_MARGIN;
+        sRelBg[bg][0] = ax;
+        sRelBg[bg][1] = ay;
+        sRelBg[bg][2] = rw;
+        sRelBg[bg][3] = rh;
+        sNrmOff[bg * 4 + 0] = ax - lx0;
+        sNrmOff[bg * 4 + 1] = ay - ly0;
+        sNrmOff[bg * 4 + 2] = 1;
+    }
+
+    /* Sprites on shelves of their own: their distance cap is another. */
+    if (P.shelf) {
+        P.y += P.shelf + RELIEF_GUTTER;
+        P.x = RELIEF_GUTTER;
+        P.shelf = 0;
+    }
+    sRelSprY0 = P.y;
+    memset(keys, 0, sizeof(keys));
+    if (n > sDecCap) {
+        sDecCap = n + 64;
+        sDecInst = (s32 *)realloc(sDecInst, (size_t)sDecCap * INST_INTS * sizeof(s32));
+    }
+    for (i = 0; i < n; i++) {
+        const RlSprite *s = &f->sprites[i];
+        u32 shape = (s->attr0 >> 14) & 3, size = (s->attr1 >> 14) & 3, key, h;
+        s32 w = kObjW[shape][size], ht = kObjH[shape][size];
+        int affine = (s->attr0 & 0x100) != 0;
+        int dbl = affine && (s->attr0 & 0x200);
+        s32 bw = w << dbl, bh = ht << dbl, x, y;
+        int fl;
+
+        if (s->space == RL_SPACE_HUD)
+            continue;
+        x = (s->x - f->viewX) * 256 + s->subX - f->viewSubX;
+        y = (s->y - f->viewY) * 256 + s->subY - f->viewSubY;
+        if (x >= f->viewW * 256 || y >= f->viewH * 256 || x + bw * 256 <= 0 || y + bh * 256 <= 0)
+            continue;
+        fl = (s->attr2 >> 12) & 15;
+        if (s->attr0 & 0x2000)
+            fl = 16;                    /* 8bpp: no palette bank             */
+        if (f->objOneD)
+            fl |= 4096;
+        key = (u32)(s->attr2 & 0x3FF) | ((u32)w << 10) | ((u32)ht << 17)
+            | ((u32)(fl & 31) << 24) | ((fl & 4096) ? 1u << 29 : 0);
+        h = (key * 2654435761u) >> 21;
+        while (keys[h] != 0 && keys[h] != key + 1)
+            h = (h + 1) & (RELIEF_HASH - 1);
+        if (keys[h] == 0) {
+            int ax = 0, ay = 0;
+            keys[h] = key + 1;
+            slotOk[h] = (u8)ReliefPlace(&P, w, ht, &ax, &ay);
+            slot[h][0] = ax;
+            slot[h][1] = ay;
+            if (slotOk[h]) {
+                s32 *o = sDecInst + sDecN * INST_INTS;
+                memset(o, 0, INST_BYTES);
+                o[0] = ax * 256; o[1] = ay * 256; o[2] = w; o[3] = ht;
+                o[4] = w; o[5] = ht; o[6] = s->attr2 & 0x3FF; o[7] = fl;
+                o[8] = 256; o[11] = 256;
+                sDecN++;
+            }
+        }
+        if (slotOk[h]) {
+            sSprSlot[i][0] = slot[h][0];
+            sSprSlot[i][1] = slot[h][1];
+            sSprHas[i] = 1;
+        }
+    }
+    sRelW = aw;
+    sRelH = P.y + P.shelf + RELIEF_GUTTER;
+    sRelOn = 1;
+}
+
+static GLuint ReliefTarget(GLuint *fbo, GLenum ifmt, GLenum fmt, GLenum type, int w, int h)
+{
+    GLuint t = MakeTex(ifmt, fmt, type, w, h);
+
+    G(glGenFramebuffers)(1, fbo);
+    G(glBindFramebuffer)(GL_FRAMEBUFFER, *fbo);
+    G(glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t, 0);
+    if (G(glCheckFramebufferStatus)(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+        PortError("[katam-port] gpu: relief target incomplete; lighting stays flat");
+        sRelOk = 0;
+    }
+    return t;
+}
+
+/* Grow-only, in steps of 128 rows. */
+static int EnsureRelief(int w, int h)
+{
+    GLuint *tex[6] = { &sTexAlb, &sTexT1, &sTexT2, &sTexT3, &sTexT4, &sTexNrm };
+    GLuint *fbo[6] = { &sFboAlb, &sFboT1, &sFboT2, &sFboT3, &sFboT4, &sFboNrm };
+    int i;
+
+    if (sTexAlb && w == sRelTexW && h <= sRelTexH)
+        return sRelOk;
+    h = (h + 127) & ~127;
+    if (h < sRelTexH && w == sRelTexW)
+        h = sRelTexH;
+    if (h > sMaxTex)
+        h = sMaxTex;
+    for (i = 0; i < 6; i++)
+        if (*tex[i]) {
+            G(glDeleteFramebuffers)(1, fbo[i]);
+            G(glDeleteTextures)(1, tex[i]);
+            *tex[i] = 0;
+        }
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_IN);
+    sTexAlb = ReliefTarget(&sFboAlb, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
+    sTexT1 = ReliefTarget(&sFboT1, GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT, w, h);
+    sTexT2 = ReliefTarget(&sFboT2, GL_RGBA32UI, GL_RGBA_INTEGER, GL_UNSIGNED_INT, w, h);
+    sTexT3 = ReliefTarget(&sFboT3, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, w, h);
+    sTexT4 = ReliefTarget(&sFboT4, GL_R32UI, GL_RED_INTEGER, GL_UNSIGNED_INT, w, h);
+    sTexNrm = ReliefTarget(&sFboNrm, GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, w, h);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0);
+    G(glBindFramebuffer)(GL_FRAMEBUFFER, 0);
+    sRelTexW = w;
+    sRelTexH = h;
+    if (!sRelOk)
+        PortLog("[katam-port] gpu: relief disabled");
+    else
+        PortLog("[katam-port] gpu: relief atlas %dx%d", w, h);
+    return sRelOk;
+}
+
+/* The composite program's uniforms must be set (its decode branch draws the
+ * layers).  Leaves the normal atlas on UNIT_NRM. */
+static void RunRelief(void)
+{
+    GLuint in[5], out[5];
+    int bg, i;
+
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_NRM);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    if (!sRelOn)
+        return;
+    if (!EnsureRelief(sRelW, sRelH)) {
+        sRelOn = 0;
+        return;
+    }
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_IN);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_ALB);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+
+    /* The art. */
+    G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboAlb);
+    G(glViewport)(0, 0, sRelW, sRelH);
+    G(glClearColor)(0.0f, 0.0f, 0.0f, 0.0f);
+    G(glClear)(GL_COLOR_BUFFER_BIT);
+    G(glBindVertexArray)(sVaoEmpty);
+    G(glUseProgram)(sProgComp);
+    G(glUniform4iv)(uCNrmOff, 4, sNrmOff);
+    for (bg = 0; bg < 4; bg++) {
+        if (!sRelBg[bg][2])
+            continue;
+        G(glViewport)(sRelBg[bg][0], sRelBg[bg][1], sRelBg[bg][2], sRelBg[bg][3]);
+        G(glUniform4i)(uCDecode, bg, 0, 0, 0);
+        G(glDrawArrays)(GL_TRIANGLES, 0, 3);
+    }
+    G(glUniform4i)(uCDecode, -1, 0, 0, 0);
+    G(glViewport)(0, 0, sRelW, sRelH);
+    if (sDecN) {
+        G(glUseProgram)(sProgObjDec);
+        G(glUniform2i)(uDecView, sRelW, sRelH);
+        G(glUniform1i)(uDecK, 1);
+        G(glUniform1i)(uDecWin, 0);
+        G(glBindVertexArray)(sVaoObj);
+        G(glBindBuffer)(GL_ARRAY_BUFFER, sInstBuf);
+        G(glBufferData)(GL_ARRAY_BUFFER, (GLsizeiptr)sDecN * INST_BYTES, sDecInst, GL_STREAM_DRAW);
+        G(glDrawArraysInstanced)(GL_TRIANGLE_STRIP, 0, 4, sDecN);
+        G(glBindVertexArray)(sVaoEmpty);
+    }
+
+    /* The passes. */
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_ALB);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexAlb);
+    in[0] = 0;       out[0] = sFboT1;
+    in[1] = sTexT1;  out[1] = sFboT2;
+    in[2] = sTexT2;  out[2] = sFboT3;
+    in[3] = sTexT3;  out[3] = sFboT4;
+    in[4] = sTexT4;  out[4] = sFboNrm;
+    for (i = 0; i < 5; i++) {
+        G(glBindFramebuffer)(GL_FRAMEBUFFER, out[i]);
+        G(glUseProgram)(sProgRel[i]);
+        G(glUniform2i)(uRelSize[i], sRelW, sRelH);
+        G(glUniform1i)(uRelSprY0[i], sRelSprY0);
+        G(glActiveTexture)(GL_TEXTURE0 + UNIT_IN);
+        G(glBindTexture)(GL_TEXTURE_2D, in[i]);
+        G(glDrawArrays)(GL_TRIANGLES, 0, 3);
+    }
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_ALB);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_NRM);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexNrm);
+    G(glActiveTexture)(GL_TEXTURE0);
+    G(glBindVertexArray)(0);
+}
+
+/* The composite's relief uniforms. */
+static void SetRelief(const RlFrame *f)
+{
+    float a = f->lightAngle * 3.14159265f / 180.0f;
+    float x = -sinf(a), y = cosf(a), z = f->lightHeight;
+    float l = sqrtf(x * x + y * y + z * z);
+
+    G(glUniform1i)(uCNrm, sRelOn);
+    if (!sRelOn)
+        return;
+    G(glUniform4iv)(uCNrmOff, 4, sNrmOff);
+    G(glUniform4f)(uCRelief, f->lightRelief, f->lightShine, 0.45f, f->lightHeight * 80.0f);
+    G(glUniform3f)(uCSunDir, x / l, y / l, z / l);
+    G(glUniform1i)(uCNrmView, f->lightNrmView);
+}
+
 void GlrDraw(const RlFrame *f)
 {
     GlrDrawScaled(f, 1);
@@ -1024,15 +1528,11 @@ void GlrDrawScaled(const RlFrame *f, int k)
     G(glActiveTexture)(GL_TEXTURE0 + 4);
     G(glBindTexture)(GL_TEXTURE_2D, 0);
 
-    /* Pass 1: sprites. */
-    DrawSprites(f, sFboObj, 0, f->numSprites, 0, which, f->viewW, f->viewH, k);
-    DrawSprites(f, sFboObjWin, f->numSprites, f->numObjWin, 1, which, f->viewW, f->viewH, k);
-    if (hudSep) {
-        EnsureHudTargets();
-        DrawSprites(f, sFboObjHud, 0, f->numSprites, 0, SPR_HUD, HUD_ATLAS_W, HUD_ATLAS_H, 1);
-    }
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_OBJN);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
 
-    /* Pass 2: composite. */
+    /* The composite's uniforms first: the relief passes draw the layers
+     * through it, and the sprite pass reads their result. */
     for (bg = 0; bg < 4; bg++) {
         const RlTileLayer *L = &f->layers[bg];
         int streamed = 0;
@@ -1070,15 +1570,7 @@ void GlrDrawScaled(const RlFrame *f, int k)
         hudD[r * 2 + 0] = f->hud[r].dx;
         hudD[r * 2 + 1] = f->hud[r].dy;
     }
-    G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboComp);
-    G(glViewport)(0, 0, f->viewW * k, f->viewH * k);
     G(glUseProgram)(sProgComp);
-    G(glActiveTexture)(GL_TEXTURE0 + 3);
-    G(glBindTexture)(GL_TEXTURE_2D, sTexObj);
-    G(glActiveTexture)(GL_TEXTURE0 + 4);
-    G(glBindTexture)(GL_TEXTURE_2D, sTexObjWin);
-    G(glActiveTexture)(GL_TEXTURE0 + 5);
-    G(glBindTexture)(GL_TEXTURE_2D, sTexMap);
     G(glUniform4i)(uCView, f->viewX, f->viewY, f->viewW, f->viewH);
     G(glUniform4i)(uCSub, f->viewSubX, f->viewSubY, k, 0);
     G(glUniform4i)(uCContent, f->contentL, f->contentT, f->contentR, f->contentB);
@@ -1091,6 +1583,32 @@ void GlrDrawScaled(const RlFrame *f, int k)
     G(glUniform2iv)(uCHudD, 8, hudD);
     G(glUniform1i)(uHPass, hudSep ? 1 : 0);
     UploadLight(f);
+    PlanRelief(f);
+    RunRelief();
+    G(glUseProgram)(sProgComp);
+    SetRelief(f);
+
+    /* Pass 1: sprites. */
+    DrawSprites(f, sFboObj, 0, f->numSprites, 0, which, f->viewW, f->viewH, k);
+    DrawSprites(f, sFboObjWin, f->numSprites, f->numObjWin, 1, which, f->viewW, f->viewH, k);
+    if (hudSep) {
+        EnsureHudTargets();
+        DrawSprites(f, sFboObjHud, 0, f->numSprites, 0, SPR_HUD, HUD_ATLAS_W, HUD_ATLAS_H, 1);
+    }
+
+    /* Pass 2: composite. */
+    G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboComp);
+    G(glViewport)(0, 0, f->viewW * k, f->viewH * k);
+    G(glUseProgram)(sProgComp);
+    G(glActiveTexture)(GL_TEXTURE0 + 3);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexObj);
+    G(glActiveTexture)(GL_TEXTURE0 + 4);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexObjWin);
+    G(glActiveTexture)(GL_TEXTURE0 + 5);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexMap);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_OBJN);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexObjN);
+    G(glActiveTexture)(GL_TEXTURE0);
     G(glBindVertexArray)(sVaoEmpty);
     G(glDrawArrays)(GL_TRIANGLES, 0, 3);
 

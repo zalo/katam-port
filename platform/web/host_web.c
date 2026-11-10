@@ -62,6 +62,12 @@ EM_JS(int, PortWebLightingParam, (void), {
     return 0;
 });
 
+/* ?normals=1: lit frames show their normal maps (render/relief_glsl.h). */
+EM_JS(int, PortWebNormalsParam, (void), {
+    try { return new URLSearchParams(location.search).get('normals') === '1' ? 1 : 0; }
+    catch (e) { return 0; }
+});
+
 EM_JS(void, PortWebLoadSettings, (char *buf, int size), {
     var t = '';
     try { t = localStorage.getItem('katam.settings') || ''; } catch (e) { t = ''; }
@@ -152,6 +158,7 @@ void PortHostInit(int argc, char **argv)
         gPortSettings.renderer = r;
     PortSettingsApplyEarly();
     gPortLightingDefault = PortWebLightingParam();
+    gPortReliefView = PortWebNormalsParam();
     PortLightResolve();
     if (gPortLighting)
         PortLog("[katam-port] lighting: on (Rainbow Route sunlight, proof of concept; Settings > Display > Lighting)");

@@ -188,6 +188,10 @@ typedef struct RlFrame {
     float lights[RL_MAX_LIGHTS][2];
     u8 lightMode;            /* RL_LIGHT_SUN / RL_LIGHT_POINT                 */
     float lightShadow, lightWarm, lightCool, lightGlow;  /* PortLightParams  */
+    /* Relief: normal maps for the sprites and layers, made on the GPU from
+     * their own pixels (render/relief_glsl.h).  lightRelief 0: none. */
+    float lightRelief, lightShine, lightHeight, lightAngle;
+    u8 lightNrmView;         /* 1: show the normals instead of the picture   */
 } RlFrame;
 
 /* --- the renderer's switches (platform/render/rl_build.c) --------------- */
@@ -235,10 +239,16 @@ typedef struct PortLightParams {
     float warmth;       /* lift of lit areas, 0..1                          */
     float cool;         /* blue of the shade, 0..1                          */
     float glow;         /* point lights' halo, 0..2                         */
+    float relief;       /* normal-mapped shading of the art, 0 off .. 2     */
+    float shine;        /* its highlight, 0..1                              */
+    float height;       /* the light's height over the picture, 0.2..2      */
 } PortLightParams;
-#define PORT_LIGHT_PARAMS_DEFAULT { RL_LIGHT_SUN, 1.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f }
+#define PORT_LIGHT_PARAMS_DEFAULT { RL_LIGHT_SUN, 1.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
+                                    1.0f, 0.35f, 0.8f }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
+/* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1). */
+extern int gPortReliefView;
 extern double gPortLightBuildMs;
 void PortLightResolve(void);
 void PortLightAttach(RlFrame *f, int roomBg);

@@ -200,6 +200,9 @@ void PortSettingsApplyEarly(void)
         L->warmth = s->lightWarm;
         L->cool = s->lightCool;
         L->glow = s->lightGlow;
+        L->relief = s->lightRelief;
+        L->shine = s->lightShine;
+        L->height = s->lightHeight;
         gPortLightingUser = s->lightOn;
         PortLightResolve();
     }

@@ -381,6 +381,46 @@ per-present camera step in game pixels, jumps excluded):
 1420-1530) the jerk goes 0.772 -> 0.103 -> 0.081 at 60 Hz and 1.215 ->
 1.146 -> 0.250 at 120 Hz, and Kirby's on-screen step sd 0.437 -> 0.
 
+## Lighting and relief (branch `lighting`)
+
+Off unless asked for: the page at `/lighting/`, `?lighting=1`, or
+`KATAM_LIGHTING=1`; Rainbow Route rooms only; GPU renderer only.
+`platform/render/light.c` builds a per-room shadow map from the collision grid
+(its header has the details) and the composite tints world pixels with it.
+
+**Relief** gives that light something to shade.  Every lit frame, every
+on-screen world sprite and the part of every non-HUD background layer around
+the view get a normal map made from their own pixels, on the GPU, by a port of
+[Sprite Normals](https://github.com/Hugo-Dz/spritefusion-sprite-normals) (MIT;
+`platform/render/relief_glsl.h`, and `third_party/spritefusion-sprite-normals/`
+for what was ported and where it differs).  It has to run in the renderer: the
+art only exists once the game has decoded it into VRAM.
+
+Per frame, before the sprite pass:
+
+1. `PlanRelief` packs the layers' pieces (view + 20 px all round, in the
+   composite's own layer coordinates) and each distinct sprite (tile, size,
+   palette, depth) onto shelves of an RGBA8 atlas with transparent gutters.
+2. `RunRelief` draws the layers through the composite program's decode branch
+   and the sprites, unflipped and unrotated, through a decode variant of the
+   sprite program, then runs the crate's steps as five full-atlas passes
+   (half floats in integer targets, which every GLES 3.0 can render to).
+3. The sprite pass writes a second target, each pixel's normal turned by its
+   sprite's flips or affine matrix; the composite reads that for sprite
+   pixels and the atlas for layer pixels.
+
+The composite shades the top pixel's normal against the sun's direction or the
+room's lights, relative to what a flat pixel gets, so flat art keeps its
+colours; shade (no direct light) gets none of it.  Settings > Display >
+Lighting: **Relief** (0 turns it off and skips the passes), **Shine**,
+**Light height**.  `?normals=1` (`KATAM_RELIEF_VIEW=1`) shows the normal maps
+instead of the picture.
+
+Checked against the crate's own CLI with `tools/relief_check/`: on 20-48 px
+test sprites the port's normals differ from the CLI's by at most 1/255 per
+channel.  `make regress-wasm` is unchanged (renderer only).  Not measured: the
+cost on a phone GPU.
+
 ## Next
 
 * **Effects** (S each): OBJ mosaic; windows as world-space shapes instead of

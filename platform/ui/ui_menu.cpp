@@ -611,6 +611,12 @@ static int PageDisplay(void)
         ImGui::BeginDisabled(s.lightMode != 1);
         changed |= ImGui::SliderFloat("##lg", &s.lightGlow, 0.0f, 2.0f, "Glow (point lights) %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
+        /* Normal maps from the art itself (render/relief_glsl.h). */
+        changed |= ImGui::SliderFloat("##lr", &s.lightRelief, 0.0f, 2.0f, "Relief (normal maps) %.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::BeginDisabled(s.lightRelief <= 0.0f);
+        changed |= ImGui::SliderFloat("##lh", &s.lightShine, 0.0f, 1.0f, "Shine %.2f", ImGuiSliderFlags_AlwaysClamp);
+        changed |= ImGui::SliderFloat("##lz", &s.lightHeight, 0.2f, 2.0f, "Light height %.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
         ImGui::PopItemWidth();
         ImGui::EndDisabled();
         if (ImGui::Button("Reset lighting")) {
@@ -624,11 +630,15 @@ static int PageDisplay(void)
             s.lightWarm = d.lightWarm;
             s.lightCool = d.lightCool;
             s.lightGlow = d.lightGlow;
+            s.lightRelief = d.lightRelief;
+            s.lightShine = d.lightShine;
+            s.lightHeight = d.lightHeight;
             changed = 1;
         }
         ImGui::EndDisabled();
         Hint("Proof of concept: GPU renderer, Rainbow Route rooms only. Shadows are cast by the "
-             "level's solid tiles.");
+             "level's solid tiles. Relief gives every sprite and background a normal map, made "
+             "from its own pixels each frame (after Sprite Normals by Hugo Duprez, MIT).");
     }
 
     if (Section("Menu size")) {

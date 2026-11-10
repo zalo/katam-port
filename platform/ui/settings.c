@@ -49,6 +49,9 @@ void PortSettingsDefaults(PortSettings *s)
         s->lightWarm = kL.warmth;
         s->lightCool = kL.cool;
         s->lightGlow = kL.glow;
+        s->lightRelief = kL.relief;
+        s->lightShine = kL.shine;
+        s->lightHeight = kL.height;
     }
 }
 
@@ -85,6 +88,9 @@ void PortSettingsClamp(PortSettings *s)
     s->lightWarm = ClampF(s->lightWarm, 0.0f, 1.0f);
     s->lightCool = ClampF(s->lightCool, 0.0f, 1.0f);
     s->lightGlow = ClampF(s->lightGlow, 0.0f, 2.0f);
+    s->lightRelief = ClampF(s->lightRelief, 0.0f, 2.0f);
+    s->lightShine = ClampF(s->lightShine, 0.0f, 1.0f);
+    s->lightHeight = ClampF(s->lightHeight, 0.2f, 2.0f);
 }
 
 void PortSettingsParse(PortSettings *s, const char *text)
@@ -135,6 +141,9 @@ void PortSettingsParse(PortSettings *s, const char *text)
                 FLT_KEY("lightwarm", lightWarm)
                 FLT_KEY("lightcool", lightCool)
                 FLT_KEY("lightglow", lightGlow)
+                FLT_KEY("lightrelief", lightRelief)
+                FLT_KEY("lightshine", lightShine)
+                FLT_KEY("lightheight", lightHeight)
 #undef INT_KEY
 #undef FLT_KEY
             }
@@ -160,11 +169,14 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
         n += snprintf(buf + n, (size_t)(size - n),
                       "light=%d\nlightmode=%d\nlightk=%.3f\nlightshadow=%.3f\n"
                       "lightsoft=%.3f\nlightangle=%.1f\nlightwarm=%.3f\n"
-                      "lightcool=%.3f\nlightglow=%.3f\n",
+                      "lightcool=%.3f\nlightglow=%.3f\nlightrelief=%.3f\n"
+                      "lightshine=%.3f\nlightheight=%.3f\n",
                       s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
-                      (double)s->lightCool, (double)s->lightGlow);
+                      (double)s->lightCool, (double)s->lightGlow,
+                      (double)s->lightRelief, (double)s->lightShine,
+                      (double)s->lightHeight);
     return n < size ? n : size - 1;
 }
 

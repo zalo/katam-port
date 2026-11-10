@@ -53,6 +53,7 @@ typedef struct PortSettings {
     int lightMode;      /* RL_LIGHT_SUN / RL_LIGHT_POINT                    */
     float lightStrength, lightShadow, lightSoft, lightAngle, lightWarm,
           lightCool, lightGlow;   /* PortLightParams                        */
+    float lightRelief, lightShine, lightHeight;   /* ... normal maps        */
 } PortSettings;
 
 extern PortSettings gPortSettings;
