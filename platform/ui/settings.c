@@ -56,6 +56,8 @@ void PortSettingsDefaults(PortSettings *s)
         s->lightSunSpeed = kL.sunSpeed;
         s->lightSprShadow = kL.sprShadow;
         s->lightReliefBg = kL.reliefBg;
+        s->lightDepth = kL.depth;
+        s->lightCharReach = kL.charReach;
     }
 }
 
@@ -99,6 +101,8 @@ void PortSettingsClamp(PortSettings *s)
     s->lightSunSpeed = ClampF(s->lightSunSpeed, 0.5f, 30.0f);
     s->lightSprShadow = ClampF(s->lightSprShadow, 0.0f, 1.0f);
     s->lightReliefBg = !!s->lightReliefBg;
+    s->lightDepth = ClampF(s->lightDepth, 0.0f, 48.0f);
+    s->lightCharReach = ClampF(s->lightCharReach, 16.0f, 160.0f);
 }
 
 void PortSettingsParse(PortSettings *s, const char *text)
@@ -162,6 +166,8 @@ void PortSettingsParse(PortSettings *s, const char *text)
                  * ignored -- as smoothcam2 above. */
                 FLT_KEY("lightcharshadow", lightSprShadow)
                 INT_KEY("lightreliefbg", lightReliefBg)
+                FLT_KEY("lightdepth", lightDepth)
+                FLT_KEY("lightcharreach", lightCharReach)
 #undef INT_KEY
 #undef FLT_KEY
             }
@@ -189,14 +195,16 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       "lightsoft=%.3f\nlightangle=%.1f\nlightwarm=%.3f\n"
                       "lightcool=%.3f\nlightglow=%.3f\nlightrelief=%.3f\n"
                       "lightshine2=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
-                      "lightsunspeed=%.2f\nlightcharshadow=%.3f\nlightreliefbg=%d\n",
+                      "lightsunspeed=%.2f\nlightcharshadow=%.3f\nlightreliefbg=%d\n"
+                      "lightdepth=%.1f\nlightcharreach=%.1f\n",
                       s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
                       (double)s->lightCool, (double)s->lightGlow,
                       (double)s->lightRelief, (double)s->lightShine,
                       (double)s->lightHeight, s->lightSunAnim, (double)s->lightSunSpeed,
-                      (double)s->lightSprShadow, s->lightReliefBg);
+                      (double)s->lightSprShadow, s->lightReliefBg,
+                      (double)s->lightDepth, (double)s->lightCharReach);
     return n < size ? n : size - 1;
 }
 

@@ -197,6 +197,7 @@ typedef struct RlFrame {
     float lightSunSide;      /* -1 sun on the right .. 1 on the left (35 deg) */
     float lightSprShadow;    /* characters' shadows: strength, 0 none         */
     float lightSoft;         /* penumbra, 0..1 (PortLightParams.soft)         */
+    float lightCharReach;    /* how far a character's shadow reaches, px      */
     u8 lightReliefBg;        /* relief on the background layers too           */
 } RlFrame;
 
@@ -253,9 +254,11 @@ typedef struct PortLightParams {
     float sprShadow;    /* characters' shadows, raycast like the level's:
                          * strength 0 off .. 1 (the level's own)            */
     int reliefBg;       /* relief on the background layers too, 0 / 1       */
+    float depth;        /* how far light reaches into solid ground, px 0..48 */
+    float charReach;    /* how far a character's shadow reaches, px 16..160  */
 } PortLightParams;
 #define PORT_LIGHT_PARAMS_DEFAULT { RL_LIGHT_SUN, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
-                                    1.0f, 0.10f, 0.8f, 1, 5.0f, 1.0f, 0 }
+                                    1.0f, 0.10f, 0.8f, 1, 5.0f, 1.0f, 0, 12.0f, 64.0f }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
 /* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);

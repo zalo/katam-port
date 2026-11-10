@@ -603,6 +603,7 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##lk", &s.lightStrength, 0.0f, 3.0f, "Strength %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##ls", &s.lightShadow, 0.0f, 0.8f, "Shadow darkness %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lf", &s.lightSoft, 0.0f, 1.0f, "Shadow softness %.2f", ImGuiSliderFlags_AlwaysClamp);
+        changed |= ImGui::SliderFloat("##lp", &s.lightDepth, 0.0f, 48.0f, "Light into the ground %.0f px", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightMode != 0);
         {
             bool anim = s.lightSunAnim != 0;
@@ -637,6 +638,9 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##lz", &s.lightHeight, 0.2f, 2.0f, "Light height %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
         changed |= ImGui::SliderFloat("##ld", &s.lightSprShadow, 0.0f, 1.0f, "Character shadows %.2f (0 off)", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::BeginDisabled(s.lightSprShadow <= 0.0f);
+        changed |= ImGui::SliderFloat("##le", &s.lightCharReach, 16.0f, 160.0f, "Character shadow length %.0f px", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
         ImGui::PopItemWidth();
         ImGui::EndDisabled();
         if (ImGui::Button("Reset lighting")) {
@@ -657,6 +661,8 @@ static int PageDisplay(void)
             s.lightSunSpeed = d.lightSunSpeed;
             s.lightSprShadow = d.lightSprShadow;
             s.lightReliefBg = d.lightReliefBg;
+            s.lightDepth = d.lightDepth;
+            s.lightCharReach = d.lightCharReach;
             changed = 1;
         }
         ImGui::EndDisabled();

@@ -58,6 +58,8 @@ typedef struct PortSettings {
     float lightSunSpeed;  /* ... degrees a second                           */
     float lightSprShadow; /* sprites' drop shadows, 0 off                   */
     int lightReliefBg;  /* relief on background layers too                  */
+    float lightDepth;   /* light into solid ground, px                      */
+    float lightCharReach; /* character shadow length, px                    */
 } PortSettings;
 
 extern PortSettings gPortSettings;

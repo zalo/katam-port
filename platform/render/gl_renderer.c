@@ -144,7 +144,7 @@ static const u8 *sLightPtr;
 #define UNIT_ALB_VIEW 11             /* the art, for ?normals=2 only          */
 #define UNIT_CHARSH 12               /* character shadows                     */
 static GLuint sProgCharSh, sTexCharSh, sFboCharSh;
-static GLint uSObjG, uSCell, uSMode, uSSunA, uSNumL, uSLv, uSDisc;
+static GLint uSObjG, uSCell, uSMode, uSSunA, uSNumL, uSLv, uSDisc, uSReach;
 static int sCharShW, sCharShH, sCharShOn;
 static GLuint sTexObjN;
 static GLuint sProgObjDec, sProgRel[5];
@@ -306,9 +306,10 @@ static const char *kCharShFs =
     "uniform int uNumL;\n"
     "uniform vec2 uLv[4];\n"         /* the lights, view px               */
     "uniform float uDisc;\n"         /* a point light's half size, px     */
+    "uniform float uReach;\n"        /* how far a shadow reaches, px      */
     "out vec4 oS;\n"
     "#define STEP 2.0\n"
-    "#define NSTEP 32\n"
+    "#define NSTEP 80\n"             /* 160 px at most                    */
     "bool occ(vec2 vp) {\n"
     "  ivec2 q = ivec2(floor(vp * float(uObjG.z)));\n"
     "  if (q.x < 0 || q.y < 0 || q.x >= uObjG.x || q.y >= uObjG.y) return false;\n"
@@ -322,8 +323,10 @@ static const char *kCharShFs =
     "    for (int r = 0; r < 5; r++) {\n"
     "      float a = uSunA.x + uSunA.y * (float(r) / 4.0 - 0.5);\n"
     "      vec2 d = vec2(-sin(a), -cos(a)) * STEP;\n"       /* towards the sun */
-    "      for (int s = 1; s <= NSTEP; s++)\n"
-    "        if (occ(p + d * float(s))) { sh += 1.0 - 0.9 * float(s) / float(NSTEP); break; }\n"
+    "      for (int s = 1; s <= NSTEP; s++) {\n"
+    "        if (float(s) * STEP > uReach) break;\n"
+    "        if (occ(p + d * float(s))) { sh += 1.0 - 0.9 * float(s) * STEP / uReach; break; }\n"
+    "      }\n"
     "    }\n"
     "    sh /= 5.0;\n"
     "  } else {\n"
@@ -336,8 +339,8 @@ static const char *kCharShFs =
     "      for (int r = 0; r < 3; r++) {\n"
     "        vec2 d = normalize(uLv[i] + nrm * uDisc * float(r - 1) - p) * STEP;\n"
     "        for (int s = 1; s <= NSTEP; s++) {\n"
-    "          if (float(s) * STEP > dist) break;\n"
-    "          if (occ(p + d * float(s))) { b += 1.0 - 0.9 * float(s) / float(NSTEP); break; }\n"
+    "          if (float(s) * STEP > min(dist, uReach)) break;\n"
+    "          if (occ(p + d * float(s))) { b += 1.0 - 0.9 * float(s) * STEP / uReach; break; }\n"
     "        }\n"
     "      }\n"
     "      sh = max(sh, b / 3.0 * clamp((560.0 - dist) / 160.0, 0.0, 1.0));\n"
@@ -891,6 +894,7 @@ int GlrInit(void *(*getProc)(const char *), int es)
         uSNumL = G(glGetUniformLocation)(sProgCharSh, "uNumL");
         uSLv = G(glGetUniformLocation)(sProgCharSh, "uLv");
         uSDisc = G(glGetUniformLocation)(sProgCharSh, "uDisc");
+        uSReach = G(glGetUniformLocation)(sProgCharSh, "uReach");
     }
     {
         /* Relief: without it the lighting is the flat one; nothing else
@@ -1764,6 +1768,8 @@ static void RunCharShadow(const RlFrame *f, int k)
     G(glUniform1i)(uSNumL, f->numLights);
     G(glUniform2fv)(uSLv, 4, lv);
     G(glUniform1f)(uSDisc, 4.0f + 56.0f * f->lightSoft);
+    G(glUniform1f)(uSReach, f->lightCharReach < 16.0f ? 16.0f
+                            : f->lightCharReach > 160.0f ? 160.0f : f->lightCharReach);
     G(glBindVertexArray)(sVaoEmpty);
     G(glDrawArrays)(GL_TRIANGLES, 0, 3);
     G(glBindTexture)(GL_TEXTURE_2D, 0);

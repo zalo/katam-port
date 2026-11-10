@@ -397,13 +397,20 @@ map texture holds the previous and the current map; `lightMix` blends them),
 so the shadows glide at a fraction of a full build's cost per frame.
 `?normals=4` shows the shadow map.
 
+*Light into the ground* (0-48 px, 12 by default; it was a fixed 36): a ray
+that starts inside solid ground counts from where it leaves it only if it
+does within this distance, otherwise the ground there is in shade.  0 shades
+solid ground from its surface down -- which also shows where the collision
+grid and the art disagree (solid cells with nothing drawn on them).
+
 **Character shadows** (Settings > Lighting, 1 = as dark as the level's, 0
 off): the level's own sun shadows with Kirby and the enemies as the
 occluders.  Every lit frame, after the sprite pass, `RunCharShadow` marches
 five rays across the sun's disc (three across each point light's) from each
 2x2 view pixels towards the light through the sprite target, counting a
 blocked ray less the further away its sprite is -- `BuildSun`'s rule -- into
-an R8 texture over the view.  The composite takes the darker of that and the
+an R8 texture over the view, out to *Character shadow length* (16-160 px,
+64 by default).  The composite takes the darker of that and the
 level's shadow for background pixels, so the two share one tint and
 darkness and never stack.  (Before them, each silhouette was simply dropped
 a few pixels away from the sun; that read as smudges and is gone.)

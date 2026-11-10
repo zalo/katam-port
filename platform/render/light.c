@@ -117,7 +117,8 @@ static u32 sGridHash;
 static int sHave;
 static int sEnvDone;
 static int sBuiltMode = -1;
-static float sBuiltSoft = -1.0f, sBuiltAngle = -1.0f;
+static float sBuiltSoft = -1.0f, sBuiltAngle = -1.0f, sBuiltDepth = -1.0f;
+static const u8 *sGrid;          /* the room's grid the map was built from */
 static double sLastBuild;
 static float sLights[RL_MAX_LIGHTS][2];
 static int sNumLights;
@@ -194,10 +195,21 @@ static void PlaceLights(s32 cw, s32 ch)
     sNumLights = n;
 }
 
+/* How far into solid ground light reaches, in march steps: a ray that starts
+ * inside the ground counts from where it leaves it, if it does within this
+ * many steps (gPortLightParams.depth, px), and is blocked otherwise.  0: the
+ * ground is shaded from its surface down. */
+static int DepthSteps(void)
+{
+    float d = gPortLightParams.depth;
+    return d <= 0.0f ? 0 : (int)(d / LIGHT_STEP + 0.5f);
+}
+
 /* 0..1: how much of light (lx,ly)'s disc the point sees. */
 static float Visible(float px0, float py0, float lx0, float ly0, float d0,
                      s32 cw, s32 ch)
 {
+    int depth = DepthSteps();
     float nx = -(ly0 - py0) / d0, ny = (lx0 - px0) / d0, lit = 0.0f;
     int r;
 
@@ -218,9 +230,9 @@ static float Visible(float px0, float py0, float lx0, float ly0, float d0,
         }
         sx = dx / d * LIGHT_STEP;
         sy = dy / d * LIGHT_STEP;
-        /* Inside the ground: start where the ray leaves it (within two
-         * tiles), so the face of a lit block is lit inside. */
-        while (start < n && start < 6
+        /* Inside the ground: start where the ray leaves it (within
+         * DepthSteps), so the face of a lit block is lit that far in. */
+        while (start < n && start < depth
                && Occ((s32)(px0 + sx * start), (s32)(py0 + sy * start), cw, ch))
             start++;
         for (s = start + 1; s < n; s++)
@@ -241,6 +253,7 @@ static float Visible(float px0, float py0, float lx0, float ly0, float d0,
  * R = shadow, G = sunlit (1 - shadow), for the shader's warm lift. */
 static void BuildSun(s32 cw, s32 ch, s32 mw, float angle, s32 ty0, s32 ty1)
 {
+    int depth = DepthSteps();
     float dx[LIGHT_RAYS], dy[LIGHT_RAYS];
     float a0 = angle * 3.14159265f / 180.0f;
     float spread = (1.0f + 16.0f * gPortLightParams.soft) * 3.14159265f / 180.0f;
@@ -260,8 +273,9 @@ static void BuildSun(s32 cw, s32 ch, s32 mw, float angle, s32 ty0, s32 ty1)
 
             for (r = 0; r < LIGHT_RAYS; r++) {
                 int s, start = 0;
-                /* Inside the ground: start where the ray leaves it. */
-                while (start < 6 && Occ((s32)(px0 + dx[r] * start),
+                /* Inside the ground: start where the ray leaves it, if it
+                 * does within DepthSteps. */
+                while (start < depth && Occ((s32)(px0 + dx[r] * start),
                                         (s32)(py0 + dy[r] * start), cw, ch))
                     start++;
                 for (s = start + 1; s < steps; s++) {
@@ -377,6 +391,8 @@ static void Build(const u8 *grid, s32 cw, s32 ch, float angle)
     }
     sBuiltMode = gPortLightParams.mode;
     sBuiltSoft = gPortLightParams.soft;
+    sBuiltDepth = gPortLightParams.depth;
+    sGrid = grid;
     sBuiltAngle = angle;
 
     BlurToCur(mw, mh);
@@ -431,8 +447,29 @@ static void Attach(RlFrame *f, int roomBg);
  * map and the sun's place stay as built. */
 void PortLightRefreshParams(RlFrame *f)
 {
+    const PortLightParams *P = &gPortLightParams;
+    int anim = P->mode == RL_LIGHT_SUN && P->sunAnim, i;
+
     if (!f || !f->light)
         return;
+    /* A map parameter changed on a held frame: build the map again from
+     * the same room's grid (the game is not running, so it is the same). */
+    if (sGrid && f->light == sMask
+        && (P->mode != sBuiltMode || P->soft != sBuiltSoft || P->depth != sBuiltDepth
+            || (P->mode == RL_LIGHT_SUN && !anim && P->angle != sBuiltAngle))) {
+        Build(sGrid, sCw, sCh, anim ? sCurAngle : P->angle);
+        f->lightGen = sGen;
+        f->lightMode = (u8)sBuiltMode;
+        f->lightMix = 1.0f;
+        f->lightAngle = sCurAngle;
+        f->numLights = (u8)sNumLights;
+        for (i = 0; i < sNumLights; i++) {
+            f->lights[i][0] = sLights[i][0];
+            f->lights[i][1] = sLights[i][1];
+        }
+    }
+    f->lightCharReach = P->charReach;
+    f->lightSoft = P->soft;
     f->lightRelief = gPortLightParams.relief;
     f->lightShine = gPortLightParams.shine;
     f->lightHeight = gPortLightParams.height;
@@ -535,7 +572,7 @@ static void Attach(RlFrame *f, int roomBg)
          * second while it moves, and once more when it settles.  The moving
          * sun's angle is the pipeline's business (SunStep). */
         const PortLightParams *P = &gPortLightParams;
-        int stale = P->mode != sBuiltMode || P->soft != sBuiltSoft
+        int stale = P->mode != sBuiltMode || P->soft != sBuiltSoft || P->depth != sBuiltDepth
                     || (P->mode == RL_LIGHT_SUN && !anim && P->angle != sBuiltAngle);
         if (stale && now - sLastBuild >= 200.0)
             sHave = 0;
@@ -604,6 +641,7 @@ static void Attach(RlFrame *f, int roomBg)
     f->lightNrmView = (u8)gPortReliefView;
     f->lightSprShadow = gPortLightParams.sprShadow;
     f->lightSoft = gPortLightParams.soft;
+    f->lightCharReach = gPortLightParams.charReach;
     f->lightReliefBg = (u8)gPortLightParams.reliefBg;
     f->numLights = (u8)sNumLights;
     for (i = 0; i < sNumLights; i++) {
