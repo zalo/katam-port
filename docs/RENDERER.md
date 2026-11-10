@@ -410,7 +410,10 @@ five rays across the sun's disc (three across each point light's) from each
 2x2 view pixels towards the light through the sprite target, counting a
 blocked ray less the further away its sprite is -- `BuildSun`'s rule -- into
 an R8 texture over the view, out to *Character shadow length* (16-160 px,
-64 by default).  The composite takes the darker of that and the
+64 by default).  A ray that starts inside solid ground (the room's collision
+cells, uploaded from light.c) counts only if it leaves the ground within
+*Character shadows into the ground* (0-48 px, 6 by default): deeper, the
+ground is in the way.  The composite takes the darker of that and the
 level's shadow for background pixels, so the two share one tint and
 darkness and never stack.  (Before them, each silhouette was simply dropped
 a few pixels away from the sun; that read as smudges and is gone.)

@@ -119,6 +119,7 @@ static int sEnvDone;
 static int sBuiltMode = -1;
 static float sBuiltSoft = -1.0f, sBuiltAngle = -1.0f, sBuiltDepth = -1.0f;
 static const u8 *sGrid;          /* the room's grid the map was built from */
+static u32 sOccGen;              /* bumps when sOcc is worked out again     */
 static double sLastBuild;
 static float sLights[RL_MAX_LIGHTS][2];
 static int sNumLights;
@@ -393,6 +394,7 @@ static void Build(const u8 *grid, s32 cw, s32 ch, float angle)
     sBuiltSoft = gPortLightParams.soft;
     sBuiltDepth = gPortLightParams.depth;
     sGrid = grid;
+    sOccGen++;
     sBuiltAngle = angle;
 
     BlurToCur(mw, mh);
@@ -469,6 +471,7 @@ void PortLightRefreshParams(RlFrame *f)
         }
     }
     f->lightCharReach = P->charReach;
+    f->lightCharDepth = P->charDepth;
     f->lightSoft = P->soft;
     f->lightRelief = gPortLightParams.relief;
     f->lightShine = gPortLightParams.shine;
@@ -642,6 +645,11 @@ static void Attach(RlFrame *f, int roomBg)
     f->lightSprShadow = gPortLightParams.sprShadow;
     f->lightSoft = gPortLightParams.soft;
     f->lightCharReach = gPortLightParams.charReach;
+    f->lightCharDepth = gPortLightParams.charDepth;
+    f->lightOcc = sOcc;
+    f->lightOccW = sCw;
+    f->lightOccH = sCh;
+    f->lightOccGen = sOccGen;
     f->lightReliefBg = (u8)gPortLightParams.reliefBg;
     f->numLights = (u8)sNumLights;
     for (i = 0; i < sNumLights; i++) {

@@ -209,6 +209,7 @@ void PortSettingsApplyEarly(void)
         L->reliefBg = s->lightReliefBg;
         L->depth = s->lightDepth;
         L->charReach = s->lightCharReach;
+        L->charDepth = s->lightCharDepth;
         gPortLightingUser = s->lightOn;
         PortLightResolve();
     }

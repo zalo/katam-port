@@ -144,7 +144,11 @@ static const u8 *sLightPtr;
 #define UNIT_ALB_VIEW 11             /* the art, for ?normals=2 only          */
 #define UNIT_CHARSH 12               /* character shadows                     */
 static GLuint sProgCharSh, sTexCharSh, sFboCharSh;
-static GLint uSObjG, uSCell, uSMode, uSSunA, uSNumL, uSLv, uSDisc, uSReach;
+static GLint uSObjG, uSCell, uSMode, uSSunA, uSNumL, uSLv, uSDisc, uSReach, uSOccG, uSViewW, uSGroundD;
+#define UNIT_OCC 13
+static GLuint sTexOcc;
+static int sOccW, sOccH;
+static u32 sOccGen = 0xFFFFFFFFu;
 static int sCharShW, sCharShH, sCharShOn;
 static GLuint sTexObjN;
 static GLuint sProgObjDec, sProgRel[5];
@@ -307,6 +311,10 @@ static const char *kCharShFs =
     "uniform vec2 uLv[4];\n"         /* the lights, view px               */
     "uniform float uDisc;\n"         /* a point light's half size, px     */
     "uniform float uReach;\n"        /* how far a shadow reaches, px      */
+    "uniform highp usampler2D uOccT;\n" /* the room's collision cells (light.c) */
+    "uniform ivec2 uOccG;\n"         /* cells w, h                        */
+    "uniform vec2 uViewW;\n"         /* the view's top-left in the world   */
+    "uniform float uGroundD;\n"      /* shadow into solid ground, px      */
     "out vec4 oS;\n"
     "#define STEP 2.0\n"
     "#define NSTEP 80\n"             /* 160 px at most                    */
@@ -316,17 +324,38 @@ static const char *kCharShFs =
     "  uint b = texelFetch(uObjT, q, 0).b;\n"
     "  return (b & 8u) != 0u && (b & 16u) == 0u;\n"
     "}\n"
+    /* light.c Occ: solid, or the top 4 px of a jump-through platform. */
+    "bool solid(vec2 vp) {\n"
+    "  vec2 w = vp + uViewW;\n"
+    "  ivec2 c = ivec2(floor(w / 16.0));\n"
+    "  if (w.x < 0.0 || w.y < 0.0 || c.x >= uOccG.x || c.y >= uOccG.y) return false;\n"
+    "  uint o = texelFetch(uOccT, c, 0).r;\n"
+    "  return o == 1u || (o == 2u && w.y - float(c.y) * 16.0 < 4.0);\n"
+    "}\n"
+    /* One ray from p (d: a STEP long) out to lim px: what a sprite on it
+     * casts here.  From inside solid ground it counts only if it leaves the
+     * ground within uGroundD -- deeper, the ground is in the way. */
+    "float ray(vec2 p, vec2 d, float lim) {\n"
+    "  bool ground = solid(p);\n"
+    "  for (int s = 1; s <= NSTEP; s++) {\n"
+    "    float t = float(s) * STEP;\n"
+    "    if (t > lim) break;\n"
+    "    vec2 q = p + d * float(s);\n"
+    "    if (ground) {\n"
+    "      if (!solid(q)) ground = false;\n"
+    "      else if (t > uGroundD) return 0.0;\n"
+    "    }\n"
+    "    if (occ(q)) return 1.0 - 0.9 * t / uReach;\n"
+    "  }\n"
+    "  return 0.0;\n"
+    "}\n"
     "void main() {\n"
     "  vec2 p = gl_FragCoord.xy * uCell;\n"
     "  float sh = 0.0;\n"
     "  if (uMode == 0) {\n"
     "    for (int r = 0; r < 5; r++) {\n"
     "      float a = uSunA.x + uSunA.y * (float(r) / 4.0 - 0.5);\n"
-    "      vec2 d = vec2(-sin(a), -cos(a)) * STEP;\n"       /* towards the sun */
-    "      for (int s = 1; s <= NSTEP; s++) {\n"
-    "        if (float(s) * STEP > uReach) break;\n"
-    "        if (occ(p + d * float(s))) { sh += 1.0 - 0.9 * float(s) * STEP / uReach; break; }\n"
-    "      }\n"
+    "      sh += ray(p, vec2(-sin(a), -cos(a)) * STEP, uReach);\n"   /* towards the sun */
     "    }\n"
     "    sh /= 5.0;\n"
     "  } else {\n"
@@ -337,11 +366,7 @@ static const char *kCharShFs =
     "      if (dist < 1.0 || dist > 560.0) continue;\n"
     "      vec2 nrm = vec2(-L.y, L.x) / dist;\n"
     "      for (int r = 0; r < 3; r++) {\n"
-    "        vec2 d = normalize(uLv[i] + nrm * uDisc * float(r - 1) - p) * STEP;\n"
-    "        for (int s = 1; s <= NSTEP; s++) {\n"
-    "          if (float(s) * STEP > min(dist, uReach)) break;\n"
-    "          if (occ(p + d * float(s))) { b += 1.0 - 0.9 * float(s) * STEP / uReach; break; }\n"
-    "        }\n"
+    "        b += ray(p, normalize(uLv[i] + nrm * uDisc * float(r - 1) - p) * STEP, min(dist, uReach));\n"
     "      }\n"
     "      sh = max(sh, b / 3.0 * clamp((560.0 - dist) / 160.0, 0.0, 1.0));\n"
     "    }\n"
@@ -895,6 +920,10 @@ int GlrInit(void *(*getProc)(const char *), int es)
         uSLv = G(glGetUniformLocation)(sProgCharSh, "uLv");
         uSDisc = G(glGetUniformLocation)(sProgCharSh, "uDisc");
         uSReach = G(glGetUniformLocation)(sProgCharSh, "uReach");
+        uSOccG = G(glGetUniformLocation)(sProgCharSh, "uOccG");
+        uSViewW = G(glGetUniformLocation)(sProgCharSh, "uViewW");
+        uSGroundD = G(glGetUniformLocation)(sProgCharSh, "uGroundD");
+        G(glUniform1i)(G(glGetUniformLocation)(sProgCharSh, "uOccT"), UNIT_OCC);
     }
     {
         /* Relief: without it the lighting is the flat one; nothing else
@@ -1756,6 +1785,24 @@ static void RunCharShadow(const RlFrame *f, int k)
         lv[i * 2 + 0] = f->lights[i][0] - (float)(f->camX + f->viewX) - f->viewSubX / 256.0f;
         lv[i * 2 + 1] = f->lights[i][1] - (float)(f->camY + f->viewY) - f->viewSubY / 256.0f;
     }
+    /* The room's collision cells, when they change (a room, a block). */
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_OCC);
+    if (f->lightOcc && f->lightOccW > 0 && f->lightOccH > 0) {
+        if (!sTexOcc || f->lightOccW != sOccW || f->lightOccH != sOccH) {
+            if (sTexOcc)
+                G(glDeleteTextures)(1, &sTexOcc);
+            sTexOcc = MakeTex(GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE, f->lightOccW, f->lightOccH);
+            sOccW = f->lightOccW;
+            sOccH = f->lightOccH;
+            sOccGen = f->lightOccGen - 1;
+        }
+        G(glBindTexture)(GL_TEXTURE_2D, sTexOcc);
+        if (f->lightOccGen != sOccGen) {
+            G(glTexSubImage2D)(GL_TEXTURE_2D, 0, 0, 0, sOccW, sOccH, GL_RED_INTEGER, GL_UNSIGNED_BYTE, f->lightOcc);
+            sOccGen = f->lightOccGen;
+        }
+    }
+    G(glActiveTexture)(GL_TEXTURE0);
     G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboCharSh);
     G(glViewport)(0, 0, w, h);
     G(glUseProgram)(sProgCharSh);
@@ -1768,6 +1815,10 @@ static void RunCharShadow(const RlFrame *f, int k)
     G(glUniform1i)(uSNumL, f->numLights);
     G(glUniform2fv)(uSLv, 4, lv);
     G(glUniform1f)(uSDisc, 4.0f + 56.0f * f->lightSoft);
+    G(glUniform2i)(uSOccG, f->lightOcc ? sOccW : 0, f->lightOcc ? sOccH : 0);
+    G(glUniform2f)(uSViewW, (float)(f->camX + f->viewX) + f->viewSubX / 256.0f,
+                   (float)(f->camY + f->viewY) + f->viewSubY / 256.0f);
+    G(glUniform1f)(uSGroundD, f->lightCharDepth);
     G(glUniform1f)(uSReach, f->lightCharReach < 16.0f ? 16.0f
                             : f->lightCharReach > 160.0f ? 160.0f : f->lightCharReach);
     G(glBindVertexArray)(sVaoEmpty);

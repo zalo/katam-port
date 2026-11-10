@@ -60,6 +60,7 @@ typedef struct PortSettings {
     int lightReliefBg;  /* relief on background layers too                  */
     float lightDepth;   /* light into solid ground, px                      */
     float lightCharReach; /* character shadow length, px                    */
+    float lightCharDepth; /* character shadows into solid ground, px        */
 } PortSettings;
 
 extern PortSettings gPortSettings;

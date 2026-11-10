@@ -58,6 +58,7 @@ void PortSettingsDefaults(PortSettings *s)
         s->lightReliefBg = kL.reliefBg;
         s->lightDepth = kL.depth;
         s->lightCharReach = kL.charReach;
+        s->lightCharDepth = kL.charDepth;
     }
 }
 
@@ -103,6 +104,7 @@ void PortSettingsClamp(PortSettings *s)
     s->lightReliefBg = !!s->lightReliefBg;
     s->lightDepth = ClampF(s->lightDepth, 0.0f, 48.0f);
     s->lightCharReach = ClampF(s->lightCharReach, 16.0f, 160.0f);
+    s->lightCharDepth = ClampF(s->lightCharDepth, 0.0f, 48.0f);
 }
 
 void PortSettingsParse(PortSettings *s, const char *text)
@@ -168,6 +170,7 @@ void PortSettingsParse(PortSettings *s, const char *text)
                 INT_KEY("lightreliefbg", lightReliefBg)
                 FLT_KEY("lightdepth", lightDepth)
                 FLT_KEY("lightcharreach", lightCharReach)
+                FLT_KEY("lightchardepth", lightCharDepth)
 #undef INT_KEY
 #undef FLT_KEY
             }
@@ -196,7 +199,7 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       "lightcool=%.3f\nlightglow=%.3f\nlightrelief=%.3f\n"
                       "lightshine2=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
                       "lightsunspeed=%.2f\nlightcharshadow=%.3f\nlightreliefbg=%d\n"
-                      "lightdepth=%.1f\nlightcharreach=%.1f\n",
+                      "lightdepth=%.1f\nlightcharreach=%.1f\nlightchardepth=%.1f\n",
                       s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
@@ -204,7 +207,8 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       (double)s->lightRelief, (double)s->lightShine,
                       (double)s->lightHeight, s->lightSunAnim, (double)s->lightSunSpeed,
                       (double)s->lightSprShadow, s->lightReliefBg,
-                      (double)s->lightDepth, (double)s->lightCharReach);
+                      (double)s->lightDepth, (double)s->lightCharReach,
+                      (double)s->lightCharDepth);
     return n < size ? n : size - 1;
 }
 

@@ -640,6 +640,7 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##ld", &s.lightSprShadow, 0.0f, 1.0f, "Character shadows %.2f (0 off)", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightSprShadow <= 0.0f);
         changed |= ImGui::SliderFloat("##le", &s.lightCharReach, 16.0f, 160.0f, "Character shadow length %.0f px", ImGuiSliderFlags_AlwaysClamp);
+        changed |= ImGui::SliderFloat("##lq", &s.lightCharDepth, 0.0f, 48.0f, "Character shadows into the ground %.0f px", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
         ImGui::PopItemWidth();
         ImGui::EndDisabled();
@@ -663,6 +664,7 @@ static int PageDisplay(void)
             s.lightReliefBg = d.lightReliefBg;
             s.lightDepth = d.lightDepth;
             s.lightCharReach = d.lightCharReach;
+            s.lightCharDepth = d.lightCharDepth;
             changed = 1;
         }
         ImGui::EndDisabled();
