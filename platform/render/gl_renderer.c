@@ -127,7 +127,8 @@ static GLint uObjView, uObjWinPass, uObjK;
 static GLint uCSub;
 static GLint uCView, uCContent, uCLayer, uCValid, uCMapGeom, uCMapScroll,
              uCNumHud, uCHudRect, uCHudD;
-static GLint uCLight, uCLightGeom, uCLightK, uCLights, uCNumLights, uCLightP, uCLightMode;
+static GLint uCLight, uCLightGeom, uCLightK, uCLights, uCNumLights, uCLightP, uCLightMode,
+             uCLightMix, uCSunSide, uCSprSh;
 static GLuint sTexLight;
 static int sLightW, sLightH;
 static u32 sLightGen;
@@ -144,18 +145,20 @@ static const u8 *sLightPtr;
 static GLuint sTexObjN;
 static GLuint sProgObjDec, sProgRel[5];
 static GLint uRelSize[5], uRelSprY0[5], uRelGenS[5], uRelGenB[5], uDecView, uDecK, uDecWin;
-/* The crate's strengths (shape, detail, normal, -): its defaults for the
- * background layers.  Sprites take less of their painted shading as relief
- * (detail 2, not 6): the game's sprites are shaded already, and lighting
- * that shading again turned a small one chalky on top and muddy below. */
-static const float kReliefGenBg[4] = { 1.15f, 6.0f, 1.5f, 0.0f };
+/* The crate's strengths (shape, detail, normal, -).  Sprites take less of
+ * their painted shading as relief (detail 2, not the crate's 6): the game's
+ * sprites are shaded already, and lighting that shading again turned a small
+ * one chalky on top and muddy below.  Background layers (off by default:
+ * Settings > Lighting > relief on backgrounds) flatter still -- at the
+ * crate's defaults every cloud and pillar became a blurred grey pillow. */
+static const float kReliefGenBg[4] = { 0.6f, 2.0f, 1.0f, 0.0f };
 static const float kReliefGenSpr[4] = { 1.15f, 2.0f, 1.5f, 0.0f };
 /* The composite's response (ambient, darkest, brightest, keep hue): sprites
  * within 0.72..1.25 of their own colours and never clipped to white;
- * background layers as first tuned.  tools/relief_check/tune.html compares
+ * background layers within 0.8..1.15.  tools/relief_check/tune.html compares
  * settings on real sprites. */
 static const float kReliefRespSpr[4] = { 0.5f, 0.72f, 1.25f, 1.0f };
-static const float kReliefRespBg[4] = { 0.45f, 0.0f, 10.0f, 0.0f };
+static const float kReliefRespBg[4] = { 0.5f, 0.8f, 1.15f, 1.0f };
 static GLint uCDecode, uCNrm, uCNrmOff, uCRelief, uCSunDir, uCNrmView, uCSprY0, uCRespS, uCRespB;
 static GLuint sTexAlb, sTexT1, sTexT2, sTexT3, sTexT4, sTexNrm;
 static GLuint sFboAlb, sFboT1, sFboT2, sFboT3, sFboT4, sFboNrm;
@@ -314,6 +317,9 @@ static const char *kCompFs =
     "uniform int uNumLights;\n"
     "uniform vec4 uLightP;\n"       /* shadow darkness, warmth, cool, glow */
     "uniform int uLightMode;\n"     /* 0 sun, 1 point lights              */
+    "uniform float uLightMix;\n"    /* the map's previous (rg) -> current (ba) */
+    "uniform float uSunSide;\n"     /* -1 sun on the right .. 1 on the left  */
+    "uniform vec4 uSprSh;\n"        /* sprite shadows: darkness, length px, away from the sun x y */
     /* Relief (relief_glsl.h): normal maps for the lighting.  uDecode.x >= 0:
      * this draw is not the composite but BG uDecode.x's colours into the
      * relief atlas, at atlas = layer coords + uNrmOff[bg].xy. */
@@ -328,7 +334,7 @@ static const char *kCompFs =
      * 1 = brighten without leaving the colour's hue (no clipping to white). */
     "uniform vec4 uRespS;\n"       /* sprites                            */
     "uniform vec4 uRespB;\n"       /* background layers                  */
-    "uniform int uNrmView;\n"      /* 1 the normals; 2, 3 the atlas's sprite art, normals */
+    "uniform int uNrmView;\n"      /* 1 the normals; 2, 3 the atlas's sprite art, normals; 4 shadow */
     "uniform highp sampler2D uAlbAtlas;\n"
     "uniform int uSprY0;\n"        /* the atlas's first sprite row       */
     "out vec4 oColor;\n"
@@ -576,7 +582,7 @@ static const char *kCompFs =
     /* Sunlight (light.c): the sun from the upper left, or point lights in
      * the room.  Every world layer and world sprite takes the shadow map's
      * shade and warmth (and the point lights' halo); never the HUD. */
-    "  if (uNrm != 0 && uNrmView >= 2 && !hudPass) {\n"
+    "  if (uNrm != 0 && (uNrmView == 2 || uNrmView == 3) && !hudPass) {\n"
     "    vec4 a = uNrmView == 2 ? texelFetch(uAlbAtlas, v + ivec2(0, uSprY0), 0)\n"
     "                           : texelFetch(uNrmAtlas, v + ivec2(0, uSprY0), 0);\n"
     "    oColor = a.a > 0.5 ? vec4(a.rgb, 1.0) : vec4(1.0, 0.0, 1.0, 1.0);\n"
@@ -588,7 +594,9 @@ static const char *kCompFs =
     "    vec3 col = toRgba(result).rgb;\n"
     "    bool hud = top == 4 ? (o.b & 16u) != 0u : (top >= 0 && uLayer[top].x == 2);\n"
     "    if (!hud) {\n"
-    "      vec2 sl = texture(uShadow, wp / 8.0 / vec2(uLightGeom.zw)).rg;\n"
+    "      vec4 slq = texture(uShadow, wp / 8.0 / vec2(uLightGeom.zw));\n"
+    "      vec2 sl = mix(slq.rg, slq.ba, uLightMix);\n"
+    "      if (uNrmView == 4) { oColor = vec4(col * 0.3 + vec3(1.0 - sl.r) * 0.7, 1.0); return; }\n"
     "      float lum = dot(col, vec3(0.30, 0.59, 0.11));\n"
     /* Shade: darker by uLightP.x, bluer by uLightP.z, at full shadow x K. */
     "      vec3 shadeC = (1.0 - uLightP.x) * mix(vec3(1.0), vec3(0.90, 0.95, 1.20), uLightP.z);\n"
@@ -624,7 +632,7 @@ static const char *kCompFs =
     "          float d0 = amb + (1.0 - amb) * max(Ld.z, 0.0);\n"
     "          float d1 = amb + (1.0 - amb) * max(dot(N, Ld), 0.0);\n"
     "          float w = clamp(K * uRelief.x * lit * plane, 0.0, 2.0);\n"
-    "          float fr = max(mix(1.0, clamp(d1 / max(d0, 1e-3), R.y, R.z), w), 0.0);\n"
+    "          float fr = clamp(mix(1.0, d1 / max(d0, 1e-3), w), R.y, R.z);\n"
     "          vec3 c0 = col;\n"
     "          col = c0 * fr;\n"
     /* Brightening a saturated colour clips it towards white; stop where
@@ -640,12 +648,48 @@ static const char *kCompFs =
     "        }\n"
     "      }\n"
     "      col *= max(mix(vec3(1.0), shadeC, K * sl.r * plane), vec3(0.1));\n"
+    /* Sprite shadows: a background pixel is shaded where a sprite in front
+     * of its layer sits a little way towards the light -- the sprite's
+     * silhouette dropped away from the sun (or the room's lights), softened
+     * over a pixel, and none where the terrain's shade already is. */
+    "      if (uSprSh.x > 0.0 && top >= 0 && top < 4) {\n"
+    "        vec2 away = uSprSh.zw;\n"
+    "        if (uLightMode == 1) {\n"
+    "          vec2 acc = vec2(0.0);\n"
+    "          for (int i = 0; i < 4; i++) {\n"
+    "            if (i >= uNumLights) break;\n"
+    "            vec2 d = wp - uLights[i];\n"
+    "            float att = max(1.0 - length(d) / 560.0, 0.0);\n"
+    "            acc += att * att * d / max(length(d), 1.0);\n"
+    "          }\n"
+    "          away = length(acc) > 1e-4 ? normalize(acc) : vec2(0.0, 1.0);\n"
+    "        }\n"
+    "        float kk = float(uSub.z);\n"
+    "        vec2 perp = vec2(-away.y, away.x);\n"
+    "        ivec2 lim = uView.zw * uSub.z;\n"
+    "        float cov = 0.0;\n"
+    /* Along the drop (half way, three quarters, all of it), so the shadow
+     * stays joined to its sprite; across it, a pixel each side, soft. */
+    "        for (int t = 0; t < 9; t++) {\n"
+    "          float along = t < 3 ? 1.0 : t < 6 ? 0.75 : 0.5;\n"
+    "          float side = float(t - (t / 3) * 3 - 1);\n"
+    "          ivec2 q = h - ivec2(round((away * uSprSh.y * along + perp * side) * kk));\n"
+    "          if (q.x < 0 || q.y < 0 || q.x >= lim.x || q.y >= lim.y) continue;\n"
+    "          uvec4 so = texelFetch(uObj, q, 0);\n"
+    "          if ((so.b & 8u) != 0u && (so.b & 16u) == 0u && int(so.b & 3u) <= lp[top])\n"
+    "            cov = max(cov, side == 0.0 ? 1.0 : 0.5);\n"
+    "        }\n"
+    "        float lit2 = uLightMode == 1 ? clamp(sl.g * 2.0, 0.0, 1.0) : 1.0 - sl.r;\n"
+    "        vec3 sprC = (1.0 - uSprSh.x) * mix(vec3(1.0), vec3(0.90, 0.95, 1.20), uLightP.z);\n"
+    "        col *= mix(vec3(1.0), sprC, clamp(K * cov * lit2 * plane, 0.0, 1.0));\n"
+    "      }\n"
     /* Warmth where the light arrives.  Sun: fading from the upper left of
      * the view, and less on pale pixels so a white sky is not washed out. */
     "      float wl = K * sl.g * uLightP.y;\n"
     "      if (uLightMode == 0) {\n"
     "        vec2 sp = clamp(vec2(b) / 256.0 / vec2(240.0, 160.0), 0.0, 1.0);\n"
-    "        wl *= (0.35 + 0.65 * (1.0 - 0.5 * (sp.x + sp.y))) * (1.0 - 0.6 * lum);\n"
+    "        float hx = 0.5 + (sp.x - 0.5) * uSunSide;\n"
+    "        wl *= (0.35 + 0.65 * (1.0 - 0.5 * (hx + sp.y))) * (1.0 - 0.6 * lum);\n"
     "      }\n"
     "      col *= vec3(1.0) + wl * vec3(0.45, 0.25, -0.08);\n"
     "      if (uLightMode == 1) {\n"
@@ -868,6 +912,9 @@ int GlrInit(void *(*getProc)(const char *), int es)
     uCNumLights = G(glGetUniformLocation)(sProgComp, "uNumLights");
     uCLightP = G(glGetUniformLocation)(sProgComp, "uLightP");
     uCLightMode = G(glGetUniformLocation)(sProgComp, "uLightMode");
+    uCLightMix = G(glGetUniformLocation)(sProgComp, "uLightMix");
+    uCSunSide = G(glGetUniformLocation)(sProgComp, "uSunSide");
+    uCSprSh = G(glGetUniformLocation)(sProgComp, "uSprSh");
     uCDecode = G(glGetUniformLocation)(sProgComp, "uDecode");
     uCNrm = G(glGetUniformLocation)(sProgComp, "uNrm");
     uCNrmOff = G(glGetUniformLocation)(sProgComp, "uNrmOff");
@@ -1178,8 +1225,9 @@ int GlrHudActive(void)
     return sReady && sHudActive && !sSrcPic;
 }
 
-/* The sunlight map (light.c): an RG8 texture, bilinear, uploaded when it
- * changes.  Off (f->light NULL): uLight 0 and the composite is the old one. */
+/* The sunlight map (light.c): an RGBA8 texture (previous and current map),
+ * bilinear, uploaded when it changes.  Off (f->light NULL): uLight 0 and the
+ * composite is the old one. */
 static void UploadLight(const RlFrame *f)
 {
     if (!f->light || f->lightW <= 0 || f->lightH <= 0
@@ -1191,7 +1239,7 @@ static void UploadLight(const RlFrame *f)
     if (!sTexLight || f->lightW != sLightW || f->lightH != sLightH) {
         if (sTexLight)
             G(glDeleteTextures)(1, &sTexLight);
-        sTexLight = MakeTex(GL_RG8, GL_RG, GL_UNSIGNED_BYTE, f->lightW, f->lightH);
+        sTexLight = MakeTex(GL_RGBA8, GL_RGBA, GL_UNSIGNED_BYTE, f->lightW, f->lightH);
         G(glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
         G(glTexParameteri)(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
         sLightW = f->lightW;
@@ -1201,7 +1249,7 @@ static void UploadLight(const RlFrame *f)
     G(glBindTexture)(GL_TEXTURE_2D, sTexLight);
     if (f->light != sLightPtr || f->lightGen != sLightGen) {
         G(glTexSubImage2D)(GL_TEXTURE_2D, 0, 0, 0, f->lightW, f->lightH,
-                           GL_RG, GL_UNSIGNED_BYTE, f->light);
+                           GL_RGBA, GL_UNSIGNED_BYTE, f->light);
         sLightPtr = f->light;
         sLightGen = f->lightGen;
     }
@@ -1213,6 +1261,14 @@ static void UploadLight(const RlFrame *f)
     G(glUniform1i)(uCNumLights, f->numLights);
     G(glUniform4f)(uCLightP, f->lightShadow, f->lightWarm, f->lightCool, f->lightGlow);
     G(glUniform1i)(uCLightMode, f->lightMode);
+    G(glUniform1f)(uCLightMix, f->lightMix);
+    G(glUniform1i)(uCNrmView, f->lightNrmView);
+    G(glUniform1f)(uCSunSide, f->lightSunSide);
+    {
+        /* Away from the sun, y down; longer as it gets lower. */
+        float a = f->lightAngle * 3.14159265f / 180.0f, sa = sinf(a);
+        G(glUniform4f)(uCSprSh, f->lightSprShadow, 8.0f * (1.0f + 0.8f * fabsf(sa)), sa, cosf(a));
+    }
 }
 
 /* --- relief: normal maps for the lighting (relief_glsl.h) -----------------
@@ -1312,7 +1368,8 @@ static void PlanRelief(const RlFrame *f)
         int ax, ay;
         s32 lx0, ly0;
 
-        if (!L->enabled || L->space == RL_SPACE_HUD || !ReliefPlace(&P, rw, rh, &ax, &ay))
+        if (!f->lightReliefBg || !L->enabled || L->space == RL_SPACE_HUD
+            || !ReliefPlace(&P, rw, rh, &ax, &ay))
             continue;
         /* The composite's layer coordinate is (screen * 256 + shift) >> 8. */
         lx0 = FloorDiv256(f->viewX * 256 + f->viewSubX + L->shiftX * 256 + L->subX) - RELIEF_MARGIN;

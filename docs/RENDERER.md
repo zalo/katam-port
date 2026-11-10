@@ -388,7 +388,25 @@ Off unless asked for: the page at `/lighting/`, `?lighting=1`, or
 `platform/render/light.c` builds a per-room shadow map from the collision grid
 (its header has the details) and the composite tints world pixels with it.
 
-**Relief** gives that light something to shade.  Every lit frame, every
+The sun can cross the sky (Settings > Lighting > *Sun crosses the sky*, on
+by default; *Sun speed* in degrees a second): sunrise far left to sunset far
+right, the lighting fading out at dusk and in at dawn so the jump back is
+never seen.  A moving sun's shadow map is rebuilt an eighth at a time each
+frame, and each finished map fades in over the time the next one takes (the
+map texture holds the previous and the current map; `lightMix` blends them),
+so the shadows glide at a fraction of a full build's cost per frame.
+`?normals=4` shows the shadow map.
+
+**Sprite shadows** (Settings > Lighting, 0 turns them off): a background
+pixel is shaded where a sprite in front of its layer sits towards the light
+-- each silhouette dropped 8 px away from the sun (longer when it is low) or
+the room's lights, joined to its sprite and softened, and none where the
+terrain's shade already falls.
+
+Default strength is 2.  **Relief** gives that light something to shade; on
+sprites only, unless *Relief on backgrounds too* is ticked -- at the crate's
+defaults every cloud and pillar became a blurred grey pillow, and the
+background settings are now much flatter.  Every lit frame, every
 on-screen world sprite and the part of every non-HUD background layer around
 the view get a normal map made from their own pixels, on the GPU, by a port of
 [Sprite Normals](https://github.com/Hugo-Dz/spritefusion-sprite-normals) (MIT;
@@ -429,7 +447,10 @@ was used to choose this on real sprites.  Settings > Display >
 Lighting: **Relief** (0 turns it off and skips the passes), **Shine**,
 **Light height**.  `?normals=1` (`KATAM_RELIEF_VIEW=1`) shows the normal maps
 instead of the picture; `?normals=2` and `=3` show the atlas's sprite groups
-and their normals, pixel for pixel.
+and their normals, pixel for pixel.  For comparing looks on one picture:
+`Module._PortWebFreeze(1)` holds the game on its frame and keeps presenting it,
+and `Module.ccall('PortWebSetting', null, ['string'], ['lightrelief=0'])`
+applies settings lines as the menu does.
 
 Checked against the crate's own CLI with `tools/relief_check/`: on 20-48 px
 test sprites the port's normals differ from the CLI's by at most 1/255 per

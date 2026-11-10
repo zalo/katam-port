@@ -52,6 +52,10 @@ void PortSettingsDefaults(PortSettings *s)
         s->lightRelief = kL.relief;
         s->lightShine = kL.shine;
         s->lightHeight = kL.height;
+        s->lightSunAnim = kL.sunAnim;
+        s->lightSunSpeed = kL.sunSpeed;
+        s->lightSprShadow = kL.sprShadow;
+        s->lightReliefBg = kL.reliefBg;
     }
 }
 
@@ -84,13 +88,17 @@ void PortSettingsClamp(PortSettings *s)
     s->lightStrength = ClampF(s->lightStrength, 0.0f, 3.0f);
     s->lightShadow = ClampF(s->lightShadow, 0.0f, 0.8f);
     s->lightSoft = ClampF(s->lightSoft, 0.0f, 1.0f);
-    s->lightAngle = ClampF(s->lightAngle, 0.0f, 75.0f);
+    s->lightAngle = ClampF(s->lightAngle, -75.0f, 75.0f);
     s->lightWarm = ClampF(s->lightWarm, 0.0f, 1.0f);
     s->lightCool = ClampF(s->lightCool, 0.0f, 1.0f);
     s->lightGlow = ClampF(s->lightGlow, 0.0f, 2.0f);
     s->lightRelief = ClampF(s->lightRelief, 0.0f, 2.0f);
     s->lightShine = ClampF(s->lightShine, 0.0f, 1.0f);
     s->lightHeight = ClampF(s->lightHeight, 0.2f, 2.0f);
+    s->lightSunAnim = !!s->lightSunAnim;
+    s->lightSunSpeed = ClampF(s->lightSunSpeed, 0.5f, 30.0f);
+    s->lightSprShadow = ClampF(s->lightSprShadow, 0.0f, 0.8f);
+    s->lightReliefBg = !!s->lightReliefBg;
 }
 
 void PortSettingsParse(PortSettings *s, const char *text)
@@ -144,6 +152,10 @@ void PortSettingsParse(PortSettings *s, const char *text)
                 FLT_KEY("lightrelief", lightRelief)
                 FLT_KEY("lightshine", lightShine)
                 FLT_KEY("lightheight", lightHeight)
+                INT_KEY("lightsunanim", lightSunAnim)
+                FLT_KEY("lightsunspeed", lightSunSpeed)
+                FLT_KEY("lightsprshadow", lightSprShadow)
+                INT_KEY("lightreliefbg", lightReliefBg)
 #undef INT_KEY
 #undef FLT_KEY
             }
@@ -170,13 +182,15 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       "light=%d\nlightmode=%d\nlightk=%.3f\nlightshadow=%.3f\n"
                       "lightsoft=%.3f\nlightangle=%.1f\nlightwarm=%.3f\n"
                       "lightcool=%.3f\nlightglow=%.3f\nlightrelief=%.3f\n"
-                      "lightshine=%.3f\nlightheight=%.3f\n",
+                      "lightshine=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
+                      "lightsunspeed=%.2f\nlightsprshadow=%.3f\nlightreliefbg=%d\n",
                       s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
                       (double)s->lightCool, (double)s->lightGlow,
                       (double)s->lightRelief, (double)s->lightShine,
-                      (double)s->lightHeight);
+                      (double)s->lightHeight, s->lightSunAnim, (double)s->lightSunSpeed,
+                      (double)s->lightSprShadow, s->lightReliefBg);
     return n < size ? n : size - 1;
 }
 

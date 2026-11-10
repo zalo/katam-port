@@ -104,7 +104,10 @@ static int IsRainbowRoute(u16 room)
 #define LIGHT_RAYS 5
 #define LIGHT_STEP 6.0f                      /* march step, px              */
 
-static u8 sMask[LIGHT_MAX_W * LIGHT_MAX_H * 2];   /* RG: shadow, light     */
+/* Per texel: the previous map's shadow and light, then the current map's.
+ * The composite blends them by f->lightMix: a moving sun's map is rebuilt
+ * a slice a frame, and each new one fades in over the time the next takes. */
+static u8 sMask[LIGHT_MAX_W * LIGHT_MAX_H * 4];
 static float sTmp[LIGHT_MAX_W * LIGHT_MAX_H * 2];
 static u8 sOcc[GRID_MAX];                    /* 0 air, 1 solid, 2 thin top  */
 static s32 sMaskW, sMaskH;
@@ -118,6 +121,23 @@ static float sBuiltSoft = -1.0f, sBuiltAngle = -1.0f;
 static double sLastBuild;
 static float sLights[RL_MAX_LIGHTS][2];
 static int sNumLights;
+
+/* The moving sun.  sPhase runs 0..1 from sunrise (SUN_ARC degrees left of
+ * overhead) to sunset (as far right), in wall-clock time at sunSpeed degrees
+ * a second; the lighting fades out over the last SUN_DUSK of the day and in
+ * over the first, so the jump back to sunrise is never seen.  A map is built
+ * SUN_JOB_FRAMES slices at a time at the angle the sun had when it started. */
+#define SUN_ARC 75.0f
+#define SUN_DUSK 0.06f
+#define SUN_JOB_FRAMES 8
+static float sPhase = 0.35f;     /* start mid-morning                      */
+static double sPhaseT;
+static int sJob, sJobRow;
+static float sJobAngle;
+static double sJobStart, sJobDur = 133.0, sSwapT;
+static float sPrevAngle, sCurAngle;
+static float sMix = 1.0f;
+static s32 sCw, sCh;
 
 static int Occ(s32 x, s32 y, s32 cw, s32 ch)
 {
@@ -219,10 +239,10 @@ static float Visible(float px0, float py0, float lx0, float ly0, float d0,
  * counts less the further away its occluder is (sky fill), so a shadow is
  * strongest at the foot of what casts it and its edge widens with distance.
  * R = shadow, G = sunlit (1 - shadow), for the shader's warm lift. */
-static void BuildSun(s32 cw, s32 ch, s32 mw, s32 mh)
+static void BuildSun(s32 cw, s32 ch, s32 mw, float angle, s32 ty0, s32 ty1)
 {
     float dx[LIGHT_RAYS], dy[LIGHT_RAYS];
-    float a0 = gPortLightParams.angle * 3.14159265f / 180.0f;
+    float a0 = angle * 3.14159265f / 180.0f;
     float spread = (1.0f + 16.0f * gPortLightParams.soft) * 3.14159265f / 180.0f;
     int steps = (int)(SUN_REACH / LIGHT_STEP), r;
     s32 tx, ty;
@@ -230,9 +250,9 @@ static void BuildSun(s32 cw, s32 ch, s32 mw, s32 mh)
     for (r = 0; r < LIGHT_RAYS; r++) {
         float a = a0 + spread * ((float)r / (LIGHT_RAYS - 1) - 0.5f);
         dx[r] = -sinf(a) * LIGHT_STEP;       /* towards the sun: up, left  */
-        dy[r] = -cosf(a) * LIGHT_STEP;
+        dy[r] = -cosf(a) * LIGHT_STEP;       /* (right for a negative angle) */
     }
-    for (ty = 0; ty < mh; ty++) {
+    for (ty = ty0; ty < ty1; ty++) {
         for (tx = 0; tx < mw; tx++) {
             float px0 = tx * LIGHT_CELL + LIGHT_CELL * 0.5f;
             float py0 = ty * LIGHT_CELL + LIGHT_CELL * 0.5f;
@@ -246,7 +266,7 @@ static void BuildSun(s32 cw, s32 ch, s32 mw, s32 mh)
                     start++;
                 for (s = start + 1; s < steps; s++) {
                     float x = px0 + dx[r] * s, y = py0 + dy[r] * s;
-                    if (y < 0.0f || x < 0.0f)
+                    if (y < 0.0f || x < 0.0f || x >= (float)(cw * 16))
                         break;                   /* out of the room: sky    */
                     if (Occ((s32)x, (s32)y, cw, ch)) {
                         sh += 1.0f - 0.9f * (float)(s - start) / (float)steps;
@@ -259,7 +279,6 @@ static void BuildSun(s32 cw, s32 ch, s32 mw, s32 mh)
             sTmp[(ty * mw + tx) * 2 + 1] = 1.0f - sh;
         }
     }
-    sNumLights = 0;
 }
 
 static void BuildPoints(s32 cw, s32 ch, s32 mw, s32 mh)
@@ -297,31 +316,11 @@ static void BuildPoints(s32 cw, s32 ch, s32 mw, s32 mh)
     }
 }
 
-static void Build(const u8 *grid, s32 cw, s32 ch)
+/* The 3x3 box blur of sTmp, into the current map. */
+static void BlurToCur(s32 mw, s32 mh)
 {
-    s32 mw = (cw * 16) / LIGHT_CELL, mh = (ch * 16) / LIGHT_CELL;
-    s32 tx, ty, i;
+    s32 tx, ty;
 
-    for (i = 0; i < cw * ch; i++) {
-        u32 a = gCollisionAttributes[grid[i]];
-        if (a & 0x200)
-            sOcc[i] = 1;
-        else if ((a >> 28) != 0 && !(a & 1))
-            sOcc[i] = 1;                     /* a slope: count it solid     */
-        else if (a & 0x4)
-            sOcc[i] = 2;                     /* jump-through platform       */
-        else
-            sOcc[i] = 0;
-    }
-    if (gPortLightParams.mode == RL_LIGHT_POINT)
-        BuildPoints(cw, ch, mw, mh);
-    else
-        BuildSun(cw, ch, mw, mh);
-    sBuiltMode = gPortLightParams.mode;
-    sBuiltSoft = gPortLightParams.soft;
-    sBuiltAngle = gPortLightParams.angle;
-
-    /* 3x3 box blur, once. */
     for (ty = 0; ty < mh; ty++) {
         for (tx = 0; tx < mw; tx++) {
             float sum0 = 0.0f, sum1 = 0.0f;
@@ -335,16 +334,117 @@ static void Build(const u8 *grid, s32 cw, s32 ch)
                     sum1 += sTmp[(y * mw + x) * 2 + 1];
                     n++;
                 }
-            sMask[(ty * mw + tx) * 2] = (u8)(sum0 / (float)n * 255.0f + 0.5f);
-            sMask[(ty * mw + tx) * 2 + 1] = (u8)(sum1 / (float)n * 255.0f + 0.5f);
+            sMask[(ty * mw + tx) * 4 + 2] = (u8)(sum0 / (float)n * 255.0f + 0.5f);
+            sMask[(ty * mw + tx) * 4 + 3] = (u8)(sum1 / (float)n * 255.0f + 0.5f);
         }
     }
+}
+
+/* The previous map := what is on screen now (mix of previous and current),
+ * so a new current map takes over without a jump. */
+static void BakePrev(s32 mw, s32 mh, float mix)
+{
+    s32 k;
+
+    for (k = 0; k < mw * mh; k++) {
+        u8 *t = &sMask[k * 4];
+        t[0] = (u8)(t[0] + (t[2] - t[0]) * mix + 0.5f);
+        t[1] = (u8)(t[1] + (t[3] - t[1]) * mix + 0.5f);
+    }
+}
+
+static void Build(const u8 *grid, s32 cw, s32 ch, float angle)
+{
+    s32 mw = (cw * 16) / LIGHT_CELL, mh = (ch * 16) / LIGHT_CELL;
+    s32 i;
+
+    for (i = 0; i < cw * ch; i++) {
+        u32 a = gCollisionAttributes[grid[i]];
+        if (a & 0x200)
+            sOcc[i] = 1;
+        else if ((a >> 28) != 0 && !(a & 1))
+            sOcc[i] = 1;                     /* a slope: count it solid     */
+        else if (a & 0x4)
+            sOcc[i] = 2;                     /* jump-through platform       */
+        else
+            sOcc[i] = 0;
+    }
+    if (gPortLightParams.mode == RL_LIGHT_POINT) {
+        BuildPoints(cw, ch, mw, mh);
+    } else {
+        BuildSun(cw, ch, mw, angle, 0, mh);
+        sNumLights = 0;
+    }
+    sBuiltMode = gPortLightParams.mode;
+    sBuiltSoft = gPortLightParams.soft;
+    sBuiltAngle = angle;
+
+    BlurToCur(mw, mh);
+    BakePrev(mw, mh, 1.0f);
     sMaskW = mw;
     sMaskH = mh;
+    sCw = cw;
+    sCh = ch;
+    sPrevAngle = sCurAngle = angle;
+    sMix = 1.0f;
+    sJob = 0;
+    sSwapT = NowMs();
+    sGen++;
+}
+
+/* The moving sun's next slice; a finished map becomes the current one. */
+static void SunStep(float target, double now)
+{
+    s32 rows = (sMaskH + SUN_JOB_FRAMES - 1) / SUN_JOB_FRAMES, end;
+
+    if (!sJob) {
+        sJob = 1;
+        sJobRow = 0;
+        sJobAngle = target;
+        sJobStart = now;
+    }
+    end = sJobRow + rows < sMaskH ? sJobRow + rows : sMaskH;
+    BuildSun(sCw, sCh, sMaskW, sJobAngle, sJobRow, end);
+    sJobRow = end;
+    if (sJobRow < sMaskH)
+        return;
+    BakePrev(sMaskW, sMaskH, sMix);
+    sPrevAngle = sPrevAngle + (sCurAngle - sPrevAngle) * sMix;
+    BlurToCur(sMaskW, sMaskH);
+    sCurAngle = sJobAngle;
+    if (fabsf(sCurAngle - sPrevAngle) > 60.0f) {
+        /* Sunset back to sunrise, in the dark: no fade across the sky. */
+        BakePrev(sMaskW, sMaskH, 1.0f);
+        sPrevAngle = sCurAngle;
+    }
+    sJobDur = now - sJobStart > 16.0 ? now - sJobStart : 16.0;
+    sSwapT = now;
+    sMix = 0.0f;
+    sJob = 0;
     sGen++;
 }
 
 static void Attach(RlFrame *f, int roomBg);
+
+/* A frame shown again (the menu's pause, a frozen frame): the look's
+ * parameters as they are now, so a change shows on the same picture.  The
+ * map and the sun's place stay as built. */
+void PortLightRefreshParams(RlFrame *f)
+{
+    if (!f || !f->light)
+        return;
+    f->lightRelief = gPortLightParams.relief;
+    f->lightShine = gPortLightParams.shine;
+    f->lightHeight = gPortLightParams.height;
+    f->lightSprShadow = gPortLightParams.sprShadow;
+    f->lightReliefBg = (u8)gPortLightParams.reliefBg;
+    f->lightNrmView = (u8)gPortReliefView;
+    f->lightShadow = gPortLightParams.shadow;
+    f->lightCool = gPortLightParams.cool;
+    f->lightGlow = gPortLightParams.glow;
+    if (!(gPortLightParams.mode == RL_LIGHT_SUN && gPortLightParams.sunAnim))
+        f->lightK = gPortLightParams.strength;
+}
 
 /* With KATAM_LIGHTING_LOG: the mean CPU cost of a frame's attach (the grid
  * hash, plus any rebuild) every 600 frames. */
@@ -377,6 +477,9 @@ static void Attach(RlFrame *f, int roomBg)
     const u8 *grid;
     s32 cw, ch, n, i;
     u32 h = 2166136261u;
+    double now;
+    int anim;
+    float target, shown, warmK = 1.0f;
 
     f->light = NULL;
     if (gPortLighting < 0)
@@ -394,7 +497,7 @@ static void Attach(RlFrame *f, int roomBg)
         if (e)
             gPortLightParams.relief = (float)atof(e);
         e = getenv("KATAM_RELIEF_VIEW");
-        if (e && e[0] >= '1' && e[0] <= '3')
+        if (e && e[0] >= '1' && e[0] <= '4')
             gPortReliefView = e[0] - '0';
         sEnvDone = 1;
     }
@@ -411,19 +514,35 @@ static void Attach(RlFrame *f, int roomBg)
     for (i = 0; i < n; i++)
         h = (h ^ grid[i]) * 16777619u;
     h ^= (u32)cw << 16;
+    now = NowMs();
+    anim = gPortLightParams.mode == RL_LIGHT_SUN && gPortLightParams.sunAnim;
+    {
+        /* The day's clock: wall time, not frames (a 120 Hz display presents
+         * twice as often), and a long gap (a hidden tab) is not a jump. */
+        double dt = now - sPhaseT;
+        if (sPhaseT == 0.0 || dt < 0.0 || dt > 100.0)
+            dt = 0.0;
+        sPhaseT = now;
+        if (anim) {
+            sPhase += (float)(dt / 1000.0) * gPortLightParams.sunSpeed / (2.0f * SUN_ARC);
+            sPhase -= floorf(sPhase);
+        }
+        target = anim ? SUN_ARC - 2.0f * SUN_ARC * sPhase : gPortLightParams.angle;
+    }
     {
         /* A changed map parameter (a menu slider): rebuild at most 5 times a
-         * second while it moves, and once more when it settles. */
+         * second while it moves, and once more when it settles.  The moving
+         * sun's angle is the pipeline's business (SunStep). */
         const PortLightParams *P = &gPortLightParams;
         int stale = P->mode != sBuiltMode || P->soft != sBuiltSoft
-                    || (P->mode == RL_LIGHT_SUN && P->angle != sBuiltAngle);
-        if (stale && NowMs() - sLastBuild >= 200.0)
+                    || (P->mode == RL_LIGHT_SUN && !anim && P->angle != sBuiltAngle);
+        if (stale && now - sLastBuild >= 200.0)
             sHave = 0;
     }
     if (!sHave || li->currentRoom != sRoom || h != sGridHash) {
         double t0 = NowMs();
         sLastBuild = t0;
-        Build(grid, cw, ch);
+        Build(grid, cw, ch, target);
         gPortLightBuildMs = NowMs() - t0;
         if (getenv("KATAM_LIGHTING_LOG"))
             fprintf(stderr, "[katam-port] light: room %u %dx%d cells -> %dx%d map, %s, %d lights, in %.2f ms\n",
@@ -437,30 +556,53 @@ static void Attach(RlFrame *f, int roomBg)
                 s32 k;
                 fprintf(fp, "P5\n%d %d\n255\n", (int)sMaskW, (int)sMaskH);
                 for (k = 0; k < sMaskW * sMaskH; k++)
-                    fputc(255 - sMask[k * 2], fp);
+                    fputc(255 - sMask[k * 4 + 2], fp);
                 fclose(fp);
             }
         }
         sRoom = li->currentRoom;
         sGridHash = h;
         sHave = 1;
+    } else if (anim) {
+        SunStep(target, now);
     }
+    sMix = anim ? (float)((now - sSwapT) / sJobDur) : 1.0f;
+    if (sMix > 1.0f)
+        sMix = 1.0f;
+    if (sMix < 0.0f)
+        sMix = 0.0f;
+    shown = sPrevAngle + (sCurAngle - sPrevAngle) * sMix;
     f->light = sMask;
     f->lightW = sMaskW;
     f->lightH = sMaskH;
     f->lightGen = sGen;
     f->lightLayers = (u8)(1u << roomBg);
     f->lightK = gPortLightParams.strength;
+    f->lightMix = sMix;
+    f->lightSunSide = sinf(shown * 3.14159265f / 180.0f) / sinf(35.0f * 3.14159265f / 180.0f);
+    if (f->lightSunSide > 1.0f) f->lightSunSide = 1.0f;
+    if (f->lightSunSide < -1.0f) f->lightSunSide = -1.0f;
+    if (anim) {
+        /* Dawn and dusk: the light fades out at the ends of the day; a low
+         * sun is warmer. */
+        float e = sPhase < SUN_DUSK ? sPhase / SUN_DUSK
+                : sPhase > 1.0f - SUN_DUSK ? (1.0f - sPhase) / SUN_DUSK : 1.0f;
+        float low = fabsf(shown) / SUN_ARC;
+        f->lightK *= e * e * (3.0f - 2.0f * e);
+        warmK = 1.0f + 0.8f * low * low;
+    }
     f->lightMode = (u8)sBuiltMode;
     f->lightShadow = gPortLightParams.shadow;
-    f->lightWarm = gPortLightParams.warmth;
+    f->lightWarm = gPortLightParams.warmth * warmK;
     f->lightCool = gPortLightParams.cool;
     f->lightGlow = gPortLightParams.glow;
     f->lightRelief = gPortLightParams.relief;
     f->lightShine = gPortLightParams.shine;
     f->lightHeight = gPortLightParams.height;
-    f->lightAngle = gPortLightParams.angle;
+    f->lightAngle = shown;
     f->lightNrmView = (u8)gPortReliefView;
+    f->lightSprShadow = gPortLightParams.sprShadow;
+    f->lightReliefBg = (u8)gPortLightParams.reliefBg;
     f->numLights = (u8)sNumLights;
     for (i = 0; i < sNumLights; i++) {
         f->lights[i][0] = sLights[i][0];

@@ -203,6 +203,10 @@ void PortSettingsApplyEarly(void)
         L->relief = s->lightRelief;
         L->shine = s->lightShine;
         L->height = s->lightHeight;
+        L->sunAnim = s->lightSunAnim;
+        L->sunSpeed = s->lightSunSpeed;
+        L->sprShadow = s->lightSprShadow;
+        L->reliefBg = s->lightReliefBg;
         gPortLightingUser = s->lightOn;
         PortLightResolve();
     }

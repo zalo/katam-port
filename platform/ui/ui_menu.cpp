@@ -596,7 +596,7 @@ static int PageDisplay(void)
             changed = 1;
         }
         ImGui::BeginDisabled(!on);
-        changed |= Radio("Sun from the upper left", &s.lightMode, 0);
+        changed |= Radio("Sun", &s.lightMode, 0);
         SameLineIfFits("Point lights");
         changed |= Radio("Point lights", &s.lightMode, 1);
         ImGui::PushItemWidth(-1);
@@ -604,7 +604,19 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##ls", &s.lightShadow, 0.0f, 0.8f, "Shadow darkness %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lf", &s.lightSoft, 0.0f, 1.0f, "Shadow softness %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightMode != 0);
-        changed |= ImGui::SliderFloat("##la", &s.lightAngle, 0.0f, 75.0f, "Sun angle %.0f deg from overhead", ImGuiSliderFlags_AlwaysClamp);
+        {
+            bool anim = s.lightSunAnim != 0;
+            if (ImGui::Checkbox("Sun crosses the sky (sunrise to sunset)", &anim)) {
+                s.lightSunAnim = anim ? 1 : 0;
+                changed = 1;
+            }
+        }
+        ImGui::BeginDisabled(!s.lightSunAnim);
+        changed |= ImGui::SliderFloat("##lv", &s.lightSunSpeed, 0.5f, 30.0f, "Sun speed %.1f deg/s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
+        ImGui::EndDisabled();
+        ImGui::BeginDisabled(s.lightSunAnim != 0);
+        changed |= ImGui::SliderFloat("##la", &s.lightAngle, -75.0f, 75.0f, "Sun angle %.0f deg (+ left, - right)", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
         changed |= ImGui::SliderFloat("##lw", &s.lightWarm, 0.0f, 1.0f, "Warmth of lit areas %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lc", &s.lightCool, 0.0f, 1.0f, "Coolness of shade %.2f", ImGuiSliderFlags_AlwaysClamp);
@@ -614,9 +626,17 @@ static int PageDisplay(void)
         /* Normal maps from the art itself (render/relief_glsl.h). */
         changed |= ImGui::SliderFloat("##lr", &s.lightRelief, 0.0f, 2.0f, "Relief (normal maps) %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightRelief <= 0.0f);
+        {
+            bool bgr = s.lightReliefBg != 0;
+            if (ImGui::Checkbox("Relief on backgrounds too (experimental)", &bgr)) {
+                s.lightReliefBg = bgr ? 1 : 0;
+                changed = 1;
+            }
+        }
         changed |= ImGui::SliderFloat("##lh", &s.lightShine, 0.0f, 1.0f, "Shine %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lz", &s.lightHeight, 0.2f, 2.0f, "Light height %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
+        changed |= ImGui::SliderFloat("##ld", &s.lightSprShadow, 0.0f, 0.8f, "Sprite shadows %.2f (0 off)", ImGuiSliderFlags_AlwaysClamp);
         ImGui::PopItemWidth();
         ImGui::EndDisabled();
         if (ImGui::Button("Reset lighting")) {
@@ -633,12 +653,17 @@ static int PageDisplay(void)
             s.lightRelief = d.lightRelief;
             s.lightShine = d.lightShine;
             s.lightHeight = d.lightHeight;
+            s.lightSunAnim = d.lightSunAnim;
+            s.lightSunSpeed = d.lightSunSpeed;
+            s.lightSprShadow = d.lightSprShadow;
+            s.lightReliefBg = d.lightReliefBg;
             changed = 1;
         }
         ImGui::EndDisabled();
         Hint("Proof of concept: GPU renderer, Rainbow Route rooms only. Shadows are cast by the "
-             "level's solid tiles. Relief gives every sprite and background a normal map, made "
-             "from its own pixels each frame (after Sprite Normals by Hugo Duprez, MIT).");
+             "level's solid tiles, and by sprites when Sprite shadows is above 0. Relief gives "
+             "sprites a normal map made from their own pixels each frame (after Sprite Normals "
+             "by Hugo Duprez, MIT); backgrounds only if you ask for it.");
     }
 
     if (Section("Menu size")) {

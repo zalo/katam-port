@@ -174,9 +174,10 @@ typedef struct RlFrame {
     u32 spritesFromHooks, spritesFromOam, spritesOffscreen, spritesOverflow;
     u8 hookSpritesUsed;      /* 0: OAM did not match the hooks this frame    */
 
-    /* Sunlight (platform/render/light.c): NULL when off.  Two u8 per 8x8
-     * world pixels from the room's top-left: shadow (light blocked) and
-     * light (light arriving), 0..255.  World x = camX + SCREEN x.  lights:
+    /* Sunlight (platform/render/light.c): NULL when off.  Four u8 per 8x8
+     * world pixels from the room's top-left: the previous map's shadow (light
+     * blocked) and light (light arriving), 0..255, then the current map's;
+     * lightMix blends them (1 = current; a moving sun fades each new map in).  World x = camX + SCREEN x.  lights:
      * the room's point lights (world px), for their halo; lightK the
      * strength (0 none, 1 default).  lightLayers: the room BG (unused by
      * the shader at present -- every non-HUD layer is lit). */
@@ -192,6 +193,10 @@ typedef struct RlFrame {
      * their own pixels (render/relief_glsl.h).  lightRelief 0: none. */
     float lightRelief, lightShine, lightHeight, lightAngle;
     u8 lightNrmView;         /* 1: show the normals instead of the picture   */
+    float lightMix;          /* previous -> current map, 0..1                 */
+    float lightSunSide;      /* -1 sun on the right .. 1 on the left (35 deg) */
+    float lightSprShadow;    /* sprites' drop shadows: darkness, 0 none       */
+    u8 lightReliefBg;        /* relief on the background layers too           */
 } RlFrame;
 
 /* --- the renderer's switches (platform/render/rl_build.c) --------------- */
@@ -235,24 +240,29 @@ typedef struct PortLightParams {
     float strength;     /* the whole effect, 0..3                           */
     float shadow;       /* how dark full shade is, 0..0.8                   */
     float soft;         /* sun disc / light size: the penumbra, 0..1        */
-    float angle;        /* sun: degrees left of straight up, 0..75          */
+    float angle;        /* sun: degrees left of straight up, -75..75        */
     float warmth;       /* lift of lit areas, 0..1                          */
     float cool;         /* blue of the shade, 0..1                          */
     float glow;         /* point lights' halo, 0..2                         */
     float relief;       /* normal-mapped shading of the art, 0 off .. 2     */
     float shine;        /* its highlight, 0..1                              */
     float height;       /* the light's height over the picture, 0.2..2      */
+    int sunAnim;        /* 1: the sun crosses the sky, sunrise to sunset    */
+    float sunSpeed;     /* ... at this many degrees a second, 0.5..30       */
+    float sprShadow;    /* sprites' drop shadows: darkness, 0 off .. 0.8    */
+    int reliefBg;       /* relief on the background layers too, 0 / 1       */
 } PortLightParams;
-#define PORT_LIGHT_PARAMS_DEFAULT { RL_LIGHT_SUN, 1.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
-                                    1.0f, 0.35f, 0.8f }
+#define PORT_LIGHT_PARAMS_DEFAULT { RL_LIGHT_SUN, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
+                                    1.0f, 0.35f, 0.8f, 1, 5.0f, 0.4f, 0 }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
 /* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);
- * 2, 3: the relief atlas's sprite art, sprite normals. */
+ * 2, 3: the relief atlas's sprite art, sprite normals; 4: the shadow map. */
 extern int gPortReliefView;
 extern double gPortLightBuildMs;
 void PortLightResolve(void);
 void PortLightAttach(RlFrame *f, int roomBg);
+void PortLightRefreshParams(RlFrame *f);
 
 /* The last frame built, for showing on a display finer than the game's pixel
  * grid and faster than its 59.73 Hz.  Presentation only: the result is a

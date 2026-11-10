@@ -63,10 +63,11 @@ EM_JS(int, PortWebLightingParam, (void), {
 });
 
 /* ?normals=1: lit frames show their normal maps (render/relief_glsl.h);
- * 2 and 3: the relief atlas's sprite art and sprite normals, pixel for pixel. */
+ * 2 and 3: the relief atlas's sprite art and sprite normals, pixel for pixel;
+ * 4: the shadow map. */
 EM_JS(int, PortWebNormalsParam, (void), {
     try { var n = parseInt(new URLSearchParams(location.search).get('normals') || '0', 10);
-          return n >= 1 && n <= 3 ? n : 0; }
+          return n >= 1 && n <= 4 ? n : 0; }
     catch (e) { return 0; }
 });
 
@@ -188,6 +189,19 @@ EM_JS(int, PortHostUiQuery, (const char *key, char *buf, int size), {
 
 /* For the page: its own gear button and keyboard. */
 EMSCRIPTEN_KEEPALIVE int PortUiIsOpenJs(void) { return PortUiIsOpen(); }
+
+/* For comparing looks on one picture (tools, the console):
+ * Module._PortWebFreeze(1) holds the game on its frame, as the menu's pause
+ * does, and keeps presenting it; Module.ccall('PortWebSetting', null,
+ * ['string'], ['lightrelief=0']) applies settings lines as the menu would. */
+static int sFreeze;
+EMSCRIPTEN_KEEPALIVE void PortWebFreeze(int on) { sFreeze = on; }
+EMSCRIPTEN_KEEPALIVE void PortWebSetting(const char *text)
+{
+    PortSettingsParse(&gPortSettings, text);
+    PortSettingsClamp(&gPortSettings);
+    PortSettingsChanged();
+}
 
 /* The playtest page (web/playtest/): a room bundle compiled in the browser.
  * Set before the ROM handshake releases main(), so the session build links
@@ -464,7 +478,7 @@ void PortAwaitAnimationFrame(void)
 {
     int online = PortRbActive() || PortNetActive();
 
-    while (sGl && PortUiIsOpen() && !online) {
+    while (sGl && (PortUiIsOpen() || sFreeze) && !online) {
         PortWebAwaitPaint();
         Show(NULL, 0, 0, 0);
     }
