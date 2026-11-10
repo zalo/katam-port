@@ -679,9 +679,14 @@ static const char *kCompFs =
     "          if ((so.b & 8u) != 0u && (so.b & 16u) == 0u && int(so.b & 3u) <= lp[top])\n"
     "            cov = max(cov, side == 0.0 ? 1.0 : 0.5);\n"
     "        }\n"
-    "        float lit2 = uLightMode == 1 ? clamp(sl.g * 2.0, 0.0, 1.0) : 1.0 - sl.r;\n"
+    /* Cast if the sprite itself stands in the light (the map where it is,
+     * not where its shadow lands: that may be inside the ground), and only
+     * partly over the terrain's own shade. */
+    "        vec4 oq = texture(uShadow, (wp - away * uSprSh.y) / 8.0 / vec2(uLightGeom.zw));\n"
+    "        vec2 os = mix(oq.rg, oq.ba, uLightMix);\n"
+    "        float litO = uLightMode == 1 ? clamp(os.g * 2.0, 0.0, 1.0) : 1.0 - os.r;\n"
     "        vec3 sprC = (1.0 - uSprSh.x) * mix(vec3(1.0), vec3(0.90, 0.95, 1.20), uLightP.z);\n"
-    "        col *= mix(vec3(1.0), sprC, clamp(K * cov * lit2 * plane, 0.0, 1.0));\n"
+    "        col *= mix(vec3(1.0), sprC, clamp(K * cov * litO * plane * (1.0 - 0.6 * sl.r), 0.0, 1.0));\n"
     "      }\n"
     /* Warmth where the light arrives.  Sun: fading from the upper left of
      * the view, and less on pale pixels so a white sky is not washed out. */
