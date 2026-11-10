@@ -397,7 +397,8 @@ map texture holds the previous and the current map; `lightMix` blends them),
 so the shadows glide at a fraction of a full build's cost per frame.
 `?normals=4` shows the shadow map.
 
-**Sprite shadows** (Settings > Lighting, 0 turns them off): a background
+**Sprite shadows** (Settings > Lighting; off by default -- tried and judged
+to read as smudges rather than shadows; the slider brings them back): a background
 pixel is shaded where a sprite in front of its layer sits towards the light
 -- each silhouette dropped 8 px away from the sun (longer when it is low) or
 the room's lights, joined to its sprite and softened, and none where the
