@@ -753,6 +753,9 @@ void PortLightRefreshParams(RlFrame *f)
         FrameLook(f);
     }
     f->lightCharReach = P->charReach;
+    f->lightEngine = (u8)P->engine;
+    f->lightDepth = P->depth;
+    f->lightBounce = P->bounce;
     f->lightCharDepth = P->charDepth;
     f->lightSoft = P->soft;
     f->lightRelief = gPortLightParams.reliefOn ? gPortLightParams.relief : 0.0f;

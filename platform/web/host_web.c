@@ -71,6 +71,14 @@ EM_JS(int, PortWebNormalsParam, (void), {
     catch (e) { return 0; }
 });
 
+/* ?engine=rc (radiance cascades) or ?engine=classic: the lighting engine
+ * for this visit, over the saved setting; -1 none given. */
+EM_JS(int, PortWebEngineParam, (void), {
+    try { var e = new URLSearchParams(location.search).get('engine');
+          return e === 'rc' ? 1 : e === 'classic' ? 0 : -1; }
+    catch (err) { return -1; }
+});
+
 EM_JS(void, PortWebLoadSettings, (char *buf, int size), {
     var t = '';
     try { t = localStorage.getItem('katam.settings') || ''; } catch (e) { t = ''; }
@@ -159,6 +167,9 @@ void PortHostInit(int argc, char **argv)
     r = PortWebRendererParam();
     if (r >= 0)
         gPortSettings.renderer = r;
+    r = PortWebEngineParam();
+    if (r >= 0)
+        gPortSettings.lightEngine = r;
     PortSettingsApplyEarly();
     gPortLightingDefault = PortWebLightingParam();
     gPortReliefView = PortWebNormalsParam();

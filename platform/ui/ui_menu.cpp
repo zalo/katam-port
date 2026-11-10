@@ -596,6 +596,19 @@ static int PageDisplay(void)
             changed = 1;
         }
         ImGui::BeginDisabled(!on);
+        /* The engine (render_list.h LIGHT_ENGINE_*): radiance cascades
+         * solve the sky, the sun, the lamps and the sprites' shadows
+         * together each frame (render/rc_glsl.h). */
+        ImGui::TextUnformatted("Engine:");
+        ImGui::SameLine();
+        changed |= Radio("Classic", &s.lightEngine, 0);
+        SameLineIfFits("Radiance cascades");
+        changed |= Radio("Radiance cascades", &s.lightEngine, 1);
+        ImGui::BeginDisabled(s.lightEngine != 1);
+        ImGui::PushItemWidth(-1);
+        changed |= ImGui::SliderFloat("##lb", &s.lightBounce, 0.0f, 1.0f, "Bounce light %.2f (radiance cascades)", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::PopItemWidth();
+        ImGui::EndDisabled();
         changed |= Radio("Auto (by room)", &s.lightMode, 0);
         SameLineIfFits("Sun");
         changed |= Radio("Sun", &s.lightMode, 1);
@@ -679,6 +692,8 @@ static int PageDisplay(void)
             s.lightCharDepth = d.lightCharDepth;
             s.lightReliefOn = d.lightReliefOn;
             s.lightIndoor = d.lightIndoor;
+            s.lightBounce = d.lightBounce;
+            /* The engine is a choice, not a tuning: Reset keeps it. */
             changed = 1;
         }
         ImGui::EndDisabled();
@@ -687,7 +702,10 @@ static int PageDisplay(void)
              "and the area's sun angle (the Sun angle slider applies with Sun). Shadows are cast by the "
              "level's solid tiles, and by Kirby and the enemies (Character shadows). Relief gives "
              "sprites a normal map made from their own pixels each frame (after Sprite Normals "
-             "by Hugo Duprez, MIT); backgrounds only if you ask for it.");
+             "by Hugo Duprez, MIT); backgrounds only if you ask for it. Radiance cascades (after "
+             "Alexander Sannikov; the sky's light in closed form after Mathis) light the room "
+             "from the sky and its lamps through every gap, with soft shadows and corners "
+             "darkened; Character shadow length is how far a sprite blocks light.");
     }
 
     if (Section("Menu size")) {

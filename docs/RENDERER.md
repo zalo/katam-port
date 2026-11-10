@@ -520,6 +520,54 @@ test sprites the port's normals differ from the CLI's by at most 1/255 per
 channel, at the crate's defaults and at `--detail-strength 2`.  `make regress-wasm` is unchanged (renderer only).  Not measured: the
 cost on a phone GPU.
 
+### Engine: radiance cascades
+
+Settings > Lighting > *Engine: Radiance cascades* (`lightengine=1`, or
+`?engine=rc` for one visit) swaps the classic engine above -- the sun's
+shadow map, analytic lamps, the character shadow pass -- for one 2D global
+illumination solve each frame: `platform/render/rc_glsl.h` (the shader and
+its layout) and `RunRadiance` in `gl_renderer.c`.  After Alexander
+Sannikov's *Radiance Cascades*, with the merge and the bilinear fix as in
+the Shadertoy versions by fad and Suslik, and the sky's light over an
+interval of directions in closed form from Mathis's *Analytic Direct
+Illumination* (shadertoy.com/view/NttSW7).
+
+- **Scene**, all the game's own: the room's collision cells block light (the
+  same 16 px cells and rules as the classic map); opaque world sprites block
+  it within *Character shadow length* of a probe (and a probe inside a
+  sprite sees past it, so characters are lit, not black); the room's lamps
+  are 3 px discs in their own colour.  A probe inside solid ground sees
+  through its own ground with light fading by e every 2.5 x *Light into the
+  ground* px, so blocks and the ground's face are lit at their edges.
+- **Sky**: a ray that gets past the last cascade unblocked sees Mathis's sky
+  (the area's shade tint, brighter overhead) plus a sun lobe at the area's
+  angle (its lift colour, 60% of the open sky's light, as wide as *Shadow
+  softness* makes the classic sun) -- integrated over the ray's own
+  directions, so the sun's penumbra is exact at any cascade resolution.  The
+  moving sun needs nothing extra: the solve is per frame.  Enclosed rooms
+  have no sky; a ray past 96 px unblocked sees a flat ambient instead, and
+  the lamps light the rest (through the room, walls in the way).
+- **Bounce** (*Bounce light*, 0.5): a ray stopped by a solid sees what the
+  last frame showed just inside it, x Bounce -- sunlit ground lights the
+  shade above it in its own colour, one more bounce each frame.
+- **Layout**: 5 cascades, probes 2 px apart (world-locked to multiples of
+  32 px, so a still scene's light does not swim as the camera scrolls) over
+  the view + 48 px, 4 directions per probe at cascade 0 and 4 x as many per
+  cascade up, intervals 0-6, 6-24, 24-96, 96-384, 384-1536 px.  Rays march
+  the collision cells by DDA (and the sprite target in 1.5 px steps near the
+  probe).  Cascades 0-2 use the bilinear fix (16 rays a texel), 3-4 the plain
+  merge.  Half floats in RG32UI targets, as the relief passes.
+- **Look**: the classic engine's settings set it -- no light at all gives
+  the classic full shade (Shadow darkness x Strength, tinted by Coolness;
+  *Indoor shade* of it indoors), the open sky the classic lit warmth,
+  linearly between; brighter than that (near lamps) keeps the hue.  Relief
+  shades each pixel's normal by the light from cascade 0's four directions.
+
+`?normals=4` shows the cascades' light instead of the shadow map.  60 frames
+a second at 1280x640 on a Radeon integrated GPU (headless Chromium) with
+either engine; the program is compiled the first time the engine is chosen.
+Not measured: phones.
+
 ## Next
 
 * **Effects** (S each): OBJ mosaic; windows as world-space shapes instead of

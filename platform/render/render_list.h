@@ -215,6 +215,9 @@ typedef struct RlFrame {
     s32 lightOccW, lightOccH;
     u32 lightOccGen;
     u8 lightReliefBg;        /* relief on the background layers too           */
+    u8 lightEngine;          /* LIGHT_ENGINE_*: classic, radiance cascades    */
+    float lightDepth;        /* how far light reaches into solid ground, px   */
+    float lightBounce;       /* radiance cascades: light off solids, 0..1     */
 } RlFrame;
 
 /* --- the renderer's switches (platform/render/rl_build.c) --------------- */
@@ -256,6 +259,10 @@ enum { RL_LIGHT_SUN = 0, RL_LIGHT_POINT = 1 };          /* what a frame uses */
 /* What the settings ask for: by the room (open sky: the area's sun;
  * enclosed: its point lights), or one of them everywhere. */
 enum { LIGHT_REQ_AUTO = 0, LIGHT_REQ_SUN = 1, LIGHT_REQ_POINT = 2 };
+/* The engine: the classic one (a shadow map from the sun, analytic lamps,
+ * the character shadow pass), or radiance cascades (render/rc_glsl.h:
+ * the sky, the sun, the lamps and the sprites in one 2D GI solve). */
+enum { LIGHT_ENGINE_CLASSIC = 0, LIGHT_ENGINE_RC = 1 };
 typedef struct PortLightParams {
     int mode;           /* LIGHT_REQ_*                                      */
     float strength;     /* the whole effect, 0..3                           */
@@ -278,9 +285,12 @@ typedef struct PortLightParams {
     float charDepth;    /* ... and into solid ground, px 0..48              */
     int reliefOn;       /* normal maps at all (relief, shine): 0 none       */
     float indoorShade;  /* point-lit rooms: shade away from the lamps, 0..1 */
+    int engine;         /* LIGHT_ENGINE_*                                   */
+    float bounce;       /* radiance cascades: light off solids, 0..1        */
 } PortLightParams;
 #define PORT_LIGHT_PARAMS_DEFAULT { LIGHT_REQ_AUTO, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
-                                    0.5f, 0.10f, 0.8f, 0, 5.0f, 1.0f, 0, 3.0f, 16.0f, 3.0f, 1, 0.12f }
+                                    0.5f, 0.10f, 0.8f, 0, 5.0f, 1.0f, 0, 3.0f, 16.0f, 3.0f, 1, 0.12f, \
+                                    LIGHT_ENGINE_CLASSIC, 0.5f }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
 /* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);

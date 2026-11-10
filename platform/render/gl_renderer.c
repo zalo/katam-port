@@ -50,6 +50,19 @@
 #include "render/gl_api.h"
 #include "render/gl_renderer.h"
 #include "render/relief_glsl.h"
+#include "render/rc_glsl.h"
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#define RcNowMs() emscripten_get_now()
+#else
+#include <time.h>
+static double RcNowMs(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000.0 + ts.tv_nsec / 1e6;
+}
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -148,6 +161,21 @@ static GLuint sProgCharSh, sTexCharSh, sFboCharSh;
 static GLint uSObjG, uSCell, uSMode, uSSunA, uSNumL, uSLv, uSDisc, uSReach, uSOccG, uSViewW, uSGroundD;
 #define UNIT_OCC 13
 static GLuint sTexOcc;
+/* Radiance cascades (rc_glsl.h): two targets the cascades take turns in,
+ * cascade 0 ending in sTexRc[0], which the composite reads on UNIT_RC. */
+#define UNIT_RC 14
+#define UNIT_RC_UP 15
+static GLuint sProgRc, sTexRc[2], sFboRc[2];
+static int sRcW, sRcH, sRcOn, sRcN[2], sRcTried;
+static float sRcOrg[2], sRcLo[3], sRcHi[3], sRcInv[3];
+static GLint uROccG, uRObjG, uRObjW, uROrg, uRP0, uRS0E0, uRCasc, uRGround, uRNumL,
+             uRLp, uRLc, uRSky, uRSun, uRSunP, uRAmb;
+static GLint uCRcOn, uCRcGeom, uCRcN, uCRcLo, uCRcHi, uCRcInv;
+static GLint uRPrevG, uRPrevS;
+/* The last composite, for the cascades' bounce: its view's top-left in
+ * the world, scale and size; 0 sPrevOk if it was not a lit world frame. */
+static int sPrevOk, sPrevK, sPrevW, sPrevH;
+static float sPrevWx, sPrevWy;
 static int sOccW, sOccH;
 static u32 sOccGen = 0xFFFFFFFFu;
 static int sCharShW, sCharShH, sCharShOn;
@@ -422,6 +450,19 @@ static const char *kCompFs =
     /* Character shadows (RunCharShadow): one texel per CHARSH_CELL view px. */
     "uniform highp sampler2D uCharSh;\n"
     "uniform vec4 uCharShP;\n"      /* strength, cell px, texture w, h      */
+    /* Radiance cascades (rc_glsl.h): cascade 0, and how its light makes
+     * the picture darker or lighter: Lo with none, Hi under the open sky. */
+    "uniform highp usampler2D uRcT;\n"
+    "uniform int uRcOn;\n"
+    "uniform vec4 uRcGeom;\n"       /* probe grid top-left (world px), spacing */
+    "uniform ivec2 uRcN;\n"         /* its probes                           */
+    "uniform vec3 uRcLo;\n"
+    "uniform vec3 uRcHi;\n"
+    "uniform vec3 uRcInv;\n"        /* 1 / the open sky's light            */
+    "vec3 rcAt(ivec2 t) {\n"
+    "  uvec2 u = texelFetch(uRcT, t, 0).rg;\n"
+    "  return vec3(unpackHalf2x16(u.x), unpackHalf2x16(u.y).x);\n"
+    "}\n"
     /* Relief (relief_glsl.h): normal maps for the lighting.  uDecode.x >= 0:
      * this draw is not the composite but BG uDecode.x's colours into the
      * relief atlas, at atlas = layer coords + uNrmOff[bg].xy. */
@@ -695,7 +736,76 @@ static const char *kCompFs =
     "    float K = uLightK;\n"
     "    vec3 col = toRgba(result).rgb;\n"
     "    bool hud = top == 4 ? (o.b & 16u) != 0u : (top >= 0 && uLayer[top].x == 2);\n"
-    "    if (!hud) {\n"
+    "    if (!hud && uRcOn != 0) {\n"
+    /* Radiance cascades: cascade 0's four directions (45, 135, 225, 315
+     * degrees, y down), bilinearly from the four probes around the pixel;
+     * their sum over the open sky's sets the picture between Lo and Hi. */
+    "      vec2 rf = (wp - uRcGeom.xy) / uRcGeom.z - 0.5;\n"
+    "      ivec2 rq0 = ivec2(floor(rf));\n"
+    "      vec2 rw = rf - vec2(rq0);\n"
+    "      vec3 Lq0 = vec3(0.0), Lq1 = vec3(0.0), Lq2 = vec3(0.0), Lq3 = vec3(0.0);\n"
+    "      for (int ck = 0; ck < 4; ck++) {\n"
+    "        ivec2 rq = clamp(rq0 + ivec2(ck & 1, ck >> 1), ivec2(0), uRcN - 1) * 2;\n"
+    "        float wq = ((ck & 1) != 0 ? rw.x : 1.0 - rw.x) * ((ck >> 1) != 0 ? rw.y : 1.0 - rw.y);\n"
+    "        Lq0 += wq * rcAt(rq);\n"
+    "        Lq1 += wq * rcAt(rq + ivec2(1, 0));\n"
+    "        Lq2 += wq * rcAt(rq + ivec2(0, 1));\n"
+    "        Lq3 += wq * rcAt(rq + ivec2(1, 1));\n"
+    "      }\n"
+    "      vec3 En = (Lq0 + Lq1 + Lq2 + Lq3) * 1.5707963 * uRcInv;\n"
+    "      vec3 mult = min(uRcLo + (uRcHi - uRcLo) * En, vec3(1.8));\n"
+    "      float plane = (top == 4 || (top >= 0 && ((uLight >> top) & 1) != 0)) ? 1.0 : 0.55;\n"
+    "      if (uNrmView == 4) { oColor = vec4(min(mult * 0.6, vec3(1.0)), 1.0); return; }\n"
+    "      vec3 lumW = vec3(0.30, 0.59, 0.11);\n"
+    "      float lit = clamp(dot(En, lumW), 0.0, 1.0);\n"
+    /* Relief: the four directions' light on the pixel's normal against on
+     * a flat pixel; the highlight towards where most light comes from. */
+    "      if (uNrm != 0) {\n"
+    "        vec4 nt = vec4(0.0);\n"
+    "        if (top == 4) nt = texelFetch(uObjN, h, 0);\n"
+    "        else if (top >= 0 && uNrmOff[top].z != 0) nt = texelFetch(uNrmAtlas, lxy[top] + uNrmOff[top].xy, 0);\n"
+    "        if (uNrmView == 1) { oColor = vec4(nt.a > 0.5 ? nt.rgb : vec3(0.15, 0.15, 0.3), 1.0); return; }\n"
+    "        if (nt.a > 0.5) {\n"
+    "          vec3 N = normalize(nt.xyz * 2.0 - 1.0);\n"
+    "          float zl = uRelief.w;\n"
+    "          vec3 o0 = normalize(vec3(0.7071, -0.7071, zl)), o1 = normalize(vec3(-0.7071, -0.7071, zl));\n"
+    "          vec3 o2 = normalize(vec3(-0.7071, 0.7071, zl)), o3 = normalize(vec3(0.7071, 0.7071, zl));\n"
+    "          float l0 = dot(Lq0, lumW), l1 = dot(Lq1, lumW), l2 = dot(Lq2, lumW), l3 = dot(Lq3, lumW);\n"
+    "          float num = l0 * max(dot(N, o0), 0.0) + l1 * max(dot(N, o1), 0.0)\n"
+    "                    + l2 * max(dot(N, o2), 0.0) + l3 * max(dot(N, o3), 0.0);\n"
+    "          float den = (l0 + l1 + l2 + l3) * o0.z;\n"
+    "          vec4 R = top == 4 ? uRespS : uRespB;\n"
+    "          float ratio = den > 1e-5 ? num / den : 1.0;\n"
+    "          float w = clamp(K * uRelief.x * lit * plane, 0.0, 2.0);\n"
+    "          mult *= clamp(mix(1.0, R.x + (1.0 - R.x) * ratio, w), R.y, R.z);\n"
+    "          vec3 Ld = o0 * l0 + o1 * l1 + o2 * l2 + o3 * l3;\n"
+    "          Ld = length(Ld) > 1e-5 ? normalize(Ld) : vec3(0.0, 0.0, 1.0);\n"
+    "          vec3 Hv = normalize(Ld + vec3(0.0, 0.0, 1.0));\n"
+    "          float sp = max(pow(max(dot(N, Hv), 0.0), 20.0) - pow(Hv.z, 20.0), 0.0);\n"
+    "          col += K * uRelief.y * lit * plane * sp * uEnvSpec;\n"
+    "        }\n"
+    "      }\n"
+    "      col *= mix(vec3(1.0), mult, plane);\n"
+    /* Brighter than the art: keep the hue, a little of the rest as white. */
+    "      float mx = max(max(col.r, col.g), col.b);\n"
+    "      if (mx > 1.0) col = col / mx + vec3((mx - 1.0) * 0.3);\n"
+    "      if (uLightMode == 1) {\n"
+    "        vec3 halo = vec3(0.0);\n"
+    "        for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
+    "          if (i >= uNumLights) break;\n"
+    "          float d = length(wp - uLights[i]);\n"
+    "          halo += (0.22 * exp(-d / 10.0) + 0.05 * exp(-d / 48.0)) * uLightCol[i];\n"
+    "        }\n"
+    "        col += K * uLightP.w * 0.5 * halo;\n"
+    "        if (uNrmView == 5)\n"
+    "          for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
+    "            if (i >= uNumLights) break;\n"
+    "            float d = length(wp - uLights[i]);\n"
+    "            if (abs(d - 8.0) < 1.0) col = vec3(1.0, 0.0, 1.0);\n"
+    "            else if (d < 3.0) col = uLightCol[i];\n"
+    "          }\n"
+    "      }\n"
+    "    } else if (!hud) {\n"
     "      vec4 slq = texture(uShadow, wp / 8.0 / vec2(uLightGeom.zw));\n"
     "      vec2 sl = mix(slq.rg, slq.ba, uLightMix);\n"
     /* Point-lit (indoors): the room's lamps, where the art draws them, light
@@ -1036,6 +1146,18 @@ int GlrInit(void *(*getProc)(const char *), int es)
     uCCharShP = G(glGetUniformLocation)(sProgComp, "uCharShP");
     uCLightCol = G(glGetUniformLocation)(sProgComp, "uLightCol");
     uCLamp = G(glGetUniformLocation)(sProgComp, "uLamp");
+    uCRcOn = G(glGetUniformLocation)(sProgComp, "uRcOn");
+    uCRcGeom = G(glGetUniformLocation)(sProgComp, "uRcGeom");
+    uCRcN = G(glGetUniformLocation)(sProgComp, "uRcN");
+    uCRcLo = G(glGetUniformLocation)(sProgComp, "uRcLo");
+    uCRcHi = G(glGetUniformLocation)(sProgComp, "uRcHi");
+    uCRcInv = G(glGetUniformLocation)(sProgComp, "uRcInv");
+    {
+        GLint loc = G(glGetUniformLocation)(sProgComp, "uRcT");
+        if (loc >= 0)
+            G(glUniform1i)(loc, UNIT_RC);
+        G(glUniform1i)(uCRcOn, 0);
+    }
     {
         GLint loc = G(glGetUniformLocation)(sProgComp, "uCharSh");
         if (loc >= 0)
@@ -1811,6 +1933,29 @@ static void SetRelief(const RlFrame *f)
     G(glUniform1i)(uCSprY0, sRelSprY0);
 }
 
+/* The room's collision cells on UNIT_OCC, uploaded when they change (a
+ * room, a block): the character shadows' and the cascades' ground. */
+static void EnsureOcc(const RlFrame *f)
+{
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_OCC);
+    if (f->lightOcc && f->lightOccW > 0 && f->lightOccH > 0) {
+        if (!sTexOcc || f->lightOccW != sOccW || f->lightOccH != sOccH) {
+            if (sTexOcc)
+                G(glDeleteTextures)(1, &sTexOcc);
+            sTexOcc = MakeTex(GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE, f->lightOccW, f->lightOccH);
+            sOccW = f->lightOccW;
+            sOccH = f->lightOccH;
+            sOccGen = f->lightOccGen - 1;
+        }
+        G(glBindTexture)(GL_TEXTURE_2D, sTexOcc);
+        if (f->lightOccGen != sOccGen) {
+            G(glTexSubImage2D)(GL_TEXTURE_2D, 0, 0, 0, sOccW, sOccH, GL_RED_INTEGER, GL_UNSIGNED_BYTE, f->lightOcc);
+            sOccGen = f->lightOccGen;
+        }
+    }
+    G(glActiveTexture)(GL_TEXTURE0);
+}
+
 /* After the sprite pass, before the composite: the characters' shadows into
  * an R8 texture over the view (kCharShFs). */
 static void RunCharShadow(const RlFrame *f, int k)
@@ -1824,7 +1969,8 @@ static void RunCharShadow(const RlFrame *f, int k)
     G(glBindTexture)(GL_TEXTURE_2D, 0);
     G(glActiveTexture)(GL_TEXTURE0);
     sCharShOn = 0;
-    if (!sProgCharSh || !f->light || !f->world || !(f->lightSprShadow > 0.0f))
+    if (!sProgCharSh || !f->light || !f->world || !(f->lightSprShadow > 0.0f)
+        || ((!sRcTried || sProgRc) && f->lightEngine == LIGHT_ENGINE_RC))
         return;
     if (!sTexCharSh || w != sCharShW || h != sCharShH) {
         if (sTexCharSh) {
@@ -1853,24 +1999,7 @@ static void RunCharShadow(const RlFrame *f, int k)
         lv[i * 2 + 0] = f->lights[i][0] - (float)(f->camX + f->viewX) - f->viewSubX / 256.0f;
         lv[i * 2 + 1] = f->lights[i][1] - (float)(f->camY + f->viewY) - f->viewSubY / 256.0f;
     }
-    /* The room's collision cells, when they change (a room, a block). */
-    G(glActiveTexture)(GL_TEXTURE0 + UNIT_OCC);
-    if (f->lightOcc && f->lightOccW > 0 && f->lightOccH > 0) {
-        if (!sTexOcc || f->lightOccW != sOccW || f->lightOccH != sOccH) {
-            if (sTexOcc)
-                G(glDeleteTextures)(1, &sTexOcc);
-            sTexOcc = MakeTex(GL_R8UI, GL_RED_INTEGER, GL_UNSIGNED_BYTE, f->lightOccW, f->lightOccH);
-            sOccW = f->lightOccW;
-            sOccH = f->lightOccH;
-            sOccGen = f->lightOccGen - 1;
-        }
-        G(glBindTexture)(GL_TEXTURE_2D, sTexOcc);
-        if (f->lightOccGen != sOccGen) {
-            G(glTexSubImage2D)(GL_TEXTURE_2D, 0, 0, 0, sOccW, sOccH, GL_RED_INTEGER, GL_UNSIGNED_BYTE, f->lightOcc);
-            sOccGen = f->lightOccGen;
-        }
-    }
-    G(glActiveTexture)(GL_TEXTURE0);
+    EnsureOcc(f);
     G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboCharSh);
     G(glViewport)(0, 0, w, h);
     G(glUseProgram)(sProgCharSh);
@@ -1896,6 +2025,236 @@ static void RunCharShadow(const RlFrame *f, int k)
     G(glBindTexture)(GL_TEXTURE_2D, sTexCharSh);
     G(glActiveTexture)(GL_TEXTURE0);
     sCharShOn = 1;
+}
+
+/* The environment's colours: the frame's, or Rainbow Route's while it
+ * carries none (all zero; render_list.h). */
+static void FrameEnv(const RlFrame *f, const float *env[4])
+{
+    static const float kEnvRR[4][3] = {
+        { 0.45f, 0.25f, -0.08f },   /* envLift  */
+        { 0.90f, 0.95f, 1.20f },    /* envShade */
+        { 0.55f, 0.42f, 0.20f },    /* envHalo  */
+        { 1.0f, 0.92f, 0.75f },     /* envSpec  */
+    };
+    int i, any = 0;
+
+    env[0] = f->envLift;
+    env[1] = f->envShade;
+    env[2] = f->envHalo;
+    env[3] = f->envSpec;
+    for (i = 0; i < 12; i++)
+        any |= env[i / 3][i % 3] != 0.0f;
+    if (!any)
+        for (i = 0; i < 4; i++)
+            env[i] = kEnvRR[i];
+}
+
+/* The cascades' program, linked the first time the engine is chosen: its
+ * compile takes a while on some drivers, and nobody else needs it. */
+static int EnsureRcProgram(void)
+{
+    double t0;
+
+    if (sProgRc || sRcTried)
+        return sProgRc != 0;
+    sRcTried = 1;
+    t0 = RcNowMs();
+    sProgRc = Link(kCompVs, kRcFs, "radiance cascades");
+    if (!sProgRc) {
+        PortLog("[katam-port] gpu: radiance cascades unavailable; the classic lighting stays");
+        return 0;
+    }
+    G(glUseProgram)(sProgRc);
+    G(glUniform1i)(G(glGetUniformLocation)(sProgRc, "uUp"), UNIT_RC_UP);
+    G(glUniform1i)(G(glGetUniformLocation)(sProgRc, "uOccT"), UNIT_OCC);
+    G(glUniform1i)(G(glGetUniformLocation)(sProgRc, "uObjT"), UNIT_IN);
+    uROccG = G(glGetUniformLocation)(sProgRc, "uOccG");
+    uRObjG = G(glGetUniformLocation)(sProgRc, "uObjG");
+    uRObjW = G(glGetUniformLocation)(sProgRc, "uObjW");
+    uROrg = G(glGetUniformLocation)(sProgRc, "uOrg");
+    uRP0 = G(glGetUniformLocation)(sProgRc, "uP0");
+    uRS0E0 = G(glGetUniformLocation)(sProgRc, "uS0E0");
+    uRCasc = G(glGetUniformLocation)(sProgRc, "uCasc");
+    uRGround = G(glGetUniformLocation)(sProgRc, "uGround");
+    uRNumL = G(glGetUniformLocation)(sProgRc, "uNumL");
+    uRLp = G(glGetUniformLocation)(sProgRc, "uLp");
+    uRLc = G(glGetUniformLocation)(sProgRc, "uLc");
+    uRSky = G(glGetUniformLocation)(sProgRc, "uSky");
+    uRSun = G(glGetUniformLocation)(sProgRc, "uSun");
+    uRSunP = G(glGetUniformLocation)(sProgRc, "uSunP");
+    uRAmb = G(glGetUniformLocation)(sProgRc, "uAmb");
+    uRPrevG = G(glGetUniformLocation)(sProgRc, "uPrevG");
+    uRPrevS = G(glGetUniformLocation)(sProgRc, "uPrevS");
+    G(glUniform1i)(G(glGetUniformLocation)(sProgRc, "uPrevT"), UNIT_RC);
+    PortLog("[katam-port] gpu: radiance cascades ready (%.0f ms to compile)", RcNowMs() - t0);
+    return 1;
+}
+
+/* Radiance cascades (rc_glsl.h), after the sprite pass (sprites block light),
+ * before the composite: the cascades top down into the two targets, and
+ * cascade 0 left on UNIT_RC with the composite's Lo, Hi and 1 / open sky.
+ *
+ * The look follows the classic engine's settings: with no light at all a
+ * pixel gets the classic full shade (Shadow darkness x Strength, tinted by
+ * Coolness; Indoor shade of it in enclosed rooms), under the open sky the
+ * classic lit warmth, linearly between.  Open rooms: the sky is the area's
+ * shade tint, the sun its lift (Warmth), carrying SUN_SHARE of the open
+ * sky's light, its disc as wide as Shadow softness makes the classic sun's.
+ * Enclosed rooms: no sky; ambient past 96 px, and the lamps, scaled so one
+ * lifts the picture by 0.18 x Strength at 24 px.  Bounce light: the last
+ * composite on UNIT_RC during the passes (rc_glsl.h). */
+#define RC_SUN_SHARE 0.6f
+static void RunRadiance(const RlFrame *f, int k)
+{
+    const int align = RC_SPACING << (RC_CASCADES - 1);
+    const float pi = 3.14159265f;
+    const float *env[4];
+    float vx, vy, K = f->lightK, lp[8 * 3], lc[8 * 3], sky[3], sun[3], amb[3], open[3];
+    float ssun, sunTot, a, th, reach;
+    int x0, y0, x1, y1, tw, th2, i, c, n, indoor;
+
+    sRcOn = 0;
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_RC);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0);
+    if (!f->light || !f->world || f->lightEngine != LIGHT_ENGINE_RC
+        || !f->lightOcc || f->lightOccW <= 0 || f->lightOccH <= 0 || !EnsureRcProgram())
+        return;
+    vx = (float)(f->camX + f->viewX) + f->viewSubX / 256.0f;
+    vy = (float)(f->camY + f->viewY) + f->viewSubY / 256.0f;
+    x0 = (int)floorf((vx - RC_MARGIN) / align) * align;
+    y0 = (int)floorf((vy - RC_MARGIN) / align) * align;
+    x1 = (int)ceilf((vx + f->viewW + RC_MARGIN) / align) * align;
+    y1 = (int)ceilf((vy + f->viewH + RC_MARGIN) / align) * align;
+    tw = (x1 - x0) / RC_SPACING * 2;
+    th2 = (y1 - y0) / RC_SPACING * 2;
+    if (tw > sMaxTex || th2 > sMaxTex)
+        return;
+    if (!sTexRc[0] || tw != sRcW || th2 != sRcH) {
+        for (i = 0; i < 2; i++) {
+            if (sTexRc[i]) {
+                G(glDeleteFramebuffers)(1, &sFboRc[i]);
+                G(glDeleteTextures)(1, &sTexRc[i]);
+            }
+            G(glActiveTexture)(GL_TEXTURE0 + UNIT_RC);
+            sTexRc[i] = MakeTex(GL_RG32UI, GL_RG_INTEGER, GL_UNSIGNED_INT, tw, th2);
+            G(glBindTexture)(GL_TEXTURE_2D, 0);
+            G(glActiveTexture)(GL_TEXTURE0);
+            G(glGenFramebuffers)(1, &sFboRc[i]);
+            G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboRc[i]);
+            G(glFramebufferTexture2D)(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, sTexRc[i], 0);
+            if (G(glCheckFramebufferStatus)(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
+                PortError("[katam-port] gpu: radiance cascade target incomplete");
+                G(glDeleteProgram)(sProgRc);
+                sProgRc = 0;
+                return;
+            }
+        }
+        sRcW = tw;
+        sRcH = th2;
+    }
+    EnsureOcc(f);
+
+    /* The light: what full shade and the open sky make of the picture. */
+    FrameEnv(f, env);
+    indoor = f->lightMode == RL_LIGHT_POINT;
+    a = f->lightAngle * pi / 180.0f;
+    th = atan2f(-cosf(a), -sinf(a));          /* towards the sun, world angle */
+    ssun = 2.0f / ((1.0f + 16.0f * f->lightSoft) * pi / 180.0f);
+    sunTot = 2.0f * atanf(ssun * pi) / ssun;   /* the lobe's light at peak 1 */
+    for (i = 0; i < 3; i++) {
+        float shadeC = (1.0f - f->lightShadow) * (1.0f + (env[1][i] - 1.0f) * f->lightCool);
+        float S = indoor ? f->lightIndoor : 1.0f;
+        float lo = 1.0f + (shadeC - 1.0f) * K * S;
+        sRcLo[i] = lo < 0.1f ? 0.1f : lo;
+        sRcHi[i] = indoor ? 1.0f : 1.0f + K * f->lightWarm * env[0][i] * 0.6f;
+        if (indoor) {
+            sky[i] = sun[i] = 0.0f;
+            amb[i] = 1.0f;
+            open[i] = 2.0f * pi;
+        } else {
+            sky[i] = 1.0f + (env[1][i] - 1.0f) * 0.6f;
+            sun[i] = (1.0f + env[0][i] * 0.6f) * 2.0f * pi * RC_SUN_SHARE / (1.0f - RC_SUN_SHARE) / sunTot;
+            amb[i] = 0.0f;
+            open[i] = 2.0f * pi * sky[i] + sun[i] * sunTot;
+        }
+        sRcInv[i] = 1.0f / open[i];
+    }
+    if (indoor)
+        ssun = 1.0f;
+    n = 0;
+    for (i = 0; i < f->numLights && i < RL_MAX_LIGHTS && n < 8; i++, n++) {
+        float ang = 2.0f * RC_LAMP_R / 24.0f, mxc = 0.0f;
+        int ch;
+        for (ch = 0; ch < 3; ch++)
+            if (f->lightCol[i][ch] > mxc) mxc = f->lightCol[i][ch];
+        lp[n * 3 + 0] = f->lights[i][0];
+        lp[n * 3 + 1] = f->lights[i][1];
+        lp[n * 3 + 2] = RC_LAMP_R;
+        for (ch = 0; ch < 3; ch++) {
+            float span = sRcHi[ch] - sRcLo[ch];
+            float col = mxc > 1e-3f ? f->lightCol[i][ch] / mxc : 1.0f;
+            lc[n * 3 + ch] = 0.18f * K * col * open[ch] / ((span < 0.05f ? 0.05f : span) * ang);
+        }
+    }
+    reach = f->lightCharReach < 8.0f ? 8.0f : f->lightCharReach > 96.0f ? 96.0f : f->lightCharReach;
+
+    G(glUseProgram)(sProgRc);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_IN);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexObj);
+    G(glActiveTexture)(GL_TEXTURE0);
+    G(glUniform2i)(uROccG, sOccW, sOccH);
+    G(glUniform3i)(uRObjG, f->viewW * k, f->viewH * k, k);
+    G(glUniform2f)(uRObjW, vx, vy);
+    G(glUniform2f)(uROrg, (float)x0, (float)y0);
+    G(glUniform2i)(uRP0, (x1 - x0) / RC_SPACING, (y1 - y0) / RC_SPACING);
+    G(glUniform2f)(uRS0E0, (float)RC_SPACING, RC_E0);
+    /* Light into the ground: here the e-fold of light through the probe's
+     * own ground (rc_glsl.h), 2.5 x the setting -- the classic map's 8 px
+     * texels light about that far in, and blocks read as lit, not holes. */
+    G(glUniform4f)(uRGround, f->lightDepth * 2.5f, f->lightSprShadow, reach, 0.0f);
+    G(glUniform1i)(uRNumL, n);
+    G(glUniform3fv)(uRLp, 8, lp);
+    G(glUniform3fv)(uRLc, 8, lc);
+    G(glUniform4f)(uRSky, sky[0], sky[1], sky[2], 0.5f);
+    G(glUniform3f)(uRSun, sun[0], sun[1], sun[2]);
+    G(glUniform2f)(uRSunP, th, ssun);
+    G(glUniform3f)(uRAmb, amb[0], amb[1], amb[2]);
+    /* Bounce: the last picture on UNIT_RC (cascade 0 goes there after);
+     * a lit white wall gives back the open sky's mean radiance x Bounce. */
+    {
+        int ok = sPrevOk && f->lightBounce > 0.0f && sPrevW == sFboW && sPrevH == sFboH;
+        float scale = (open[0] + open[1] + open[2]) / 3.0f / (2.0f * pi);
+        G(glActiveTexture)(GL_TEXTURE0 + UNIT_RC);
+        G(glBindTexture)(GL_TEXTURE_2D, ok ? sTexComp : 0);
+        G(glActiveTexture)(GL_TEXTURE0);
+        G(glUniform4f)(uRPrevG, sPrevWx, sPrevWy, (float)sPrevK, ok ? f->lightBounce * scale : 0.0f);
+        G(glUniform2i)(uRPrevS, sPrevW, sPrevH);
+    }
+    G(glViewport)(0, 0, tw, th2);
+    G(glBindVertexArray)(sVaoEmpty);
+    for (c = RC_CASCADES - 1; c >= 0; c--) {
+        int out = c & 1, top = c == RC_CASCADES - 1;
+        G(glActiveTexture)(GL_TEXTURE0 + UNIT_RC_UP);
+        G(glBindTexture)(GL_TEXTURE_2D, top ? 0 : sTexRc[out ^ 1]);
+        G(glActiveTexture)(GL_TEXTURE0);
+        G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboRc[out]);
+        G(glUniform4i)(uRCasc, c, top, !top && c < RC_FIX, indoor ? RC_AMB_CASCADE : -1);
+        G(glDrawArrays)(GL_TRIANGLES, 0, 3);
+    }
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_RC_UP);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_IN);
+    G(glBindTexture)(GL_TEXTURE_2D, 0);
+    G(glActiveTexture)(GL_TEXTURE0 + UNIT_RC);
+    G(glBindTexture)(GL_TEXTURE_2D, sTexRc[0]);
+    G(glActiveTexture)(GL_TEXTURE0);
+    sRcOrg[0] = (float)x0;
+    sRcOrg[1] = (float)y0;
+    sRcN[0] = (x1 - x0) / RC_SPACING;
+    sRcN[1] = (y1 - y0) / RC_SPACING;
+    sRcOn = 1;
 }
 
 void GlrDraw(const RlFrame *f)
@@ -2011,6 +2370,7 @@ void GlrDrawScaled(const RlFrame *f, int k)
         DrawSprites(f, sFboObjHud, 0, f->numSprites, 0, SPR_HUD, HUD_ATLAS_W, HUD_ATLAS_H, 1);
     }
     RunCharShadow(f, k);
+    RunRadiance(f, k);
 
     /* Pass 2: composite. */
     G(glBindFramebuffer)(GL_FRAMEBUFFER, sFboComp);
@@ -2028,8 +2388,22 @@ void GlrDrawScaled(const RlFrame *f, int k)
     BindReliefView(f);
     G(glUniform4f)(uCCharShP, sCharShOn ? f->lightSprShadow : 0.0f, (float)CHARSH_CELL,
                    (float)sCharShW, (float)sCharShH);
+    G(glUniform1i)(uCRcOn, sRcOn);
+    if (sRcOn) {
+        G(glUniform4f)(uCRcGeom, sRcOrg[0], sRcOrg[1], (float)RC_SPACING, 0.0f);
+        G(glUniform2i)(uCRcN, sRcN[0], sRcN[1]);
+        G(glUniform3f)(uCRcLo, sRcLo[0], sRcLo[1], sRcLo[2]);
+        G(glUniform3f)(uCRcHi, sRcHi[0], sRcHi[1], sRcHi[2]);
+        G(glUniform3f)(uCRcInv, sRcInv[0], sRcInv[1], sRcInv[2]);
+    }
     G(glBindVertexArray)(sVaoEmpty);
     G(glDrawArrays)(GL_TRIANGLES, 0, 3);
+    sPrevOk = f->world && f->light != NULL;
+    sPrevWx = (float)(f->camX + f->viewX) + f->viewSubX / 256.0f;
+    sPrevWy = (float)(f->camY + f->viewY) + f->viewSubY / 256.0f;
+    sPrevK = k;
+    sPrevW = f->viewW * k;
+    sPrevH = f->viewH * k;
 
     /* The HUD layer: the same composite, region by region into the atlas,
      * HUD layer and HUD sprites only, at HUD coordinates. */

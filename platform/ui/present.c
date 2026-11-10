@@ -212,6 +212,8 @@ void PortSettingsApplyEarly(void)
         L->charDepth = s->lightCharDepth;
         L->reliefOn = s->lightReliefOn;
         L->indoorShade = s->lightIndoor;
+        L->engine = s->lightEngine;
+        L->bounce = s->lightBounce;
         gPortLightingUser = s->lightOn;
         PortLightResolve();
     }
