@@ -69,6 +69,8 @@ extern PortSettings gPortSettings;
 void PortSettingsDefaults(PortSettings *s);
 /* Apply "key=value" lines over *s; unknown keys and bad values are skipped. */
 void PortSettingsParse(PortSettings *s, const char *text);
+/* Every lighting setting but the on/off switch to its default. */
+void LightDefaults(PortSettings *s);
 /* Returns the length written (always NUL-terminated). */
 int PortSettingsFormat(const PortSettings *s, char *buf, int size);
 void PortSettingsClamp(PortSettings *s);

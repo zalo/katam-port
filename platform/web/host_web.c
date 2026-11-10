@@ -198,7 +198,11 @@ static int sFreeze;
 EMSCRIPTEN_KEEPALIVE void PortWebFreeze(int on) { sFreeze = on; }
 EMSCRIPTEN_KEEPALIVE void PortWebSetting(const char *text)
 {
-    PortSettingsParse(&gPortSettings, text);
+    char buf[1024];
+
+    /* Current, so the version check keeps what is already set. */
+    snprintf(buf, sizeof(buf), "lightver=99\n%s", text);
+    PortSettingsParse(&gPortSettings, buf);
     PortSettingsClamp(&gPortSettings);
     PortSettingsChanged();
 }

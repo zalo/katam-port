@@ -591,20 +591,22 @@ static int PageDisplay(void)
          * the shadow map, at most 5 times a second while a slider moves. */
         bool on = gPortLighting > 0;
         ImGui::BeginDisabled(s.renderer != PS_RENDER_GPU);
-        if (ImGui::Checkbox("Sunlight and shadows (Rainbow Route)", &on)) {
+        if (ImGui::Checkbox("Lighting and shadows (every level)", &on)) {
             s.lightOn = on ? 1 : 0;
             changed = 1;
         }
         ImGui::BeginDisabled(!on);
-        changed |= Radio("Sun", &s.lightMode, 0);
+        changed |= Radio("Auto (by room)", &s.lightMode, 0);
+        SameLineIfFits("Sun");
+        changed |= Radio("Sun", &s.lightMode, 1);
         SameLineIfFits("Point lights");
-        changed |= Radio("Point lights", &s.lightMode, 1);
+        changed |= Radio("Point lights", &s.lightMode, 2);
         ImGui::PushItemWidth(-1);
         changed |= ImGui::SliderFloat("##lk", &s.lightStrength, 0.0f, 3.0f, "Strength %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##ls", &s.lightShadow, 0.0f, 0.8f, "Shadow darkness %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lf", &s.lightSoft, 0.0f, 1.0f, "Shadow softness %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lp", &s.lightDepth, 0.0f, 48.0f, "Light into the ground %.0f px", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::BeginDisabled(s.lightMode != 0);
+        ImGui::BeginDisabled(s.lightMode == 2);
         {
             bool anim = s.lightSunAnim != 0;
             if (ImGui::Checkbox("Sun crosses the sky (sunrise to sunset)", &anim)) {
@@ -615,13 +617,13 @@ static int PageDisplay(void)
         ImGui::BeginDisabled(!s.lightSunAnim);
         changed |= ImGui::SliderFloat("##lv", &s.lightSunSpeed, 0.5f, 30.0f, "Sun speed %.1f deg/s", ImGuiSliderFlags_AlwaysClamp | ImGuiSliderFlags_Logarithmic);
         ImGui::EndDisabled();
-        ImGui::BeginDisabled(s.lightSunAnim != 0);
+        ImGui::BeginDisabled(s.lightSunAnim != 0 || s.lightMode != 1);
         changed |= ImGui::SliderFloat("##la", &s.lightAngle, -75.0f, 75.0f, "Sun angle %.0f deg (+ left, - right)", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
         ImGui::EndDisabled();
         changed |= ImGui::SliderFloat("##lw", &s.lightWarm, 0.0f, 1.0f, "Warmth of lit areas %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lc", &s.lightCool, 0.0f, 1.0f, "Coolness of shade %.2f", ImGuiSliderFlags_AlwaysClamp);
-        ImGui::BeginDisabled(s.lightMode != 1);
+        ImGui::BeginDisabled(s.lightMode == 1);
         changed |= ImGui::SliderFloat("##lg", &s.lightGlow, 0.0f, 2.0f, "Glow (point lights) %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
         /* Normal maps from the art itself (render/relief_glsl.h). */
@@ -678,7 +680,9 @@ static int PageDisplay(void)
             changed = 1;
         }
         ImGui::EndDisabled();
-        Hint("Proof of concept: GPU renderer, Rainbow Route rooms only. Shadows are cast by the "
+        Hint("Proof of concept: GPU renderer. Each area has its own light (sun, moon, stars; "
+             "torches, crystals, lava indoors); Auto picks point lights for rooms closed to the sky "
+             "and the area's sun angle (the Sun angle slider applies with Sun). Shadows are cast by the "
              "level's solid tiles, and by Kirby and the enemies (Character shadows). Relief gives "
              "sprites a normal map made from their own pixels each frame (after Sprite Normals "
              "by Hugo Duprez, MIT); backgrounds only if you ask for it.");

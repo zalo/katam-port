@@ -38,9 +38,19 @@ void PortSettingsDefaults(PortSettings *s)
      * down after a minute or so of play (2026-11-09). */
     s->smoothCam = 0;
     s->interp = 1;
+    s->lightOn = -1;
+    LightDefaults(s);
+}
+
+/* The lighting settings saved by a build before LIGHT_SETTINGS_VER are
+ * dropped for the current defaults, once (the on/off switch is kept): the
+ * defaults moved a long way while the lighting was being tuned, and every
+ * value was saved by anyone who touched any setting. */
+#define LIGHT_SETTINGS_VER 3
+void LightDefaults(PortSettings *s)
+{
     {
         static const PortLightParams kL = PORT_LIGHT_PARAMS_DEFAULT;
-        s->lightOn = -1;
         s->lightMode = kL.mode;
         s->lightStrength = kL.strength;
         s->lightShadow = kL.shadow;
@@ -88,7 +98,7 @@ void PortSettingsClamp(PortSettings *s)
     s->smoothCam = !!s->smoothCam;
     s->interp = !!s->interp;
     s->lightOn = ClampI(s->lightOn, -1, 1);
-    s->lightMode = ClampI(s->lightMode, 0, 1);
+    s->lightMode = ClampI(s->lightMode, 0, 2);
     s->lightStrength = ClampF(s->lightStrength, 0.0f, 3.0f);
     s->lightShadow = ClampF(s->lightShadow, 0.0f, 0.8f);
     s->lightSoft = ClampF(s->lightSoft, 0.0f, 1.0f);
@@ -112,6 +122,7 @@ void PortSettingsClamp(PortSettings *s)
 void PortSettingsParse(PortSettings *s, const char *text)
 {
     const char *p = text;
+    int lightVer = -1, lightKeys = 0;
 
     while (p != NULL && *p != '\0') {
         char key[32], val[64];
@@ -174,12 +185,18 @@ void PortSettingsParse(PortSettings *s, const char *text)
                 FLT_KEY("lightcharreach", lightCharReach)
                 FLT_KEY("lightchardepth", lightCharDepth)
                 INT_KEY("lightreliefon", lightReliefOn)
+                else if (strcmp(key, "lightver") == 0) lightVer = (int)strtol(val, NULL, 0);
 #undef INT_KEY
 #undef FLT_KEY
+                if (strncmp(key, "light", 5) == 0 && strcmp(key, "light") != 0
+                    && strcmp(key, "lightver") != 0)
+                    lightKeys = 1;
             }
         }
         p = *eol ? eol + 1 : eol;
     }
+    if (lightKeys && lightVer < LIGHT_SETTINGS_VER)
+        LightDefaults(s);
     PortSettingsClamp(s);
 }
 
@@ -197,13 +214,13 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       s->smoothCam, s->interp);
     if (n >= 0 && n < size)
         n += snprintf(buf + n, (size_t)(size - n),
-                      "light=%d\nlightmode=%d\nlightk=%.3f\nlightshadow=%.3f\n"
+                      "lightver=%d\nlight=%d\nlightmode=%d\nlightk=%.3f\nlightshadow=%.3f\n"
                       "lightsoft=%.3f\nlightangle=%.1f\nlightwarm=%.3f\n"
                       "lightcool=%.3f\nlightglow=%.3f\nlightrelief=%.3f\n"
                       "lightshine2=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
                       "lightsunspeed=%.2f\nlightcharshadow=%.3f\nlightreliefbg=%d\n"
                       "lightdepth=%.1f\nlightcharreach=%.1f\nlightchardepth=%.1f\nlightreliefon=%d\n",
-                      s->lightOn, s->lightMode, (double)s->lightStrength,
+                      LIGHT_SETTINGS_VER, s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
                       (double)s->lightCool, (double)s->lightGlow,

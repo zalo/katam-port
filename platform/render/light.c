@@ -1,31 +1,33 @@
-/* Sunlight for Rainbow Route (proof of concept, branch `lighting`).
+/* Lighting for every level (branch `lighting`).
  *
  * Off unless asked for: KATAM_LIGHTING=1 (native/node) or the web page's
  * /lighting/ path or ?lighting=1 (host_web.c sets gPortLighting).  With it
  * off nothing here runs and the render list is what it always was.
  *
- * Two modes (gPortLightParams, the settings menu's Lighting section):
- * the sun (default) -- parallel rays from the upper left, beyond the top of
- * the room, at gPortLightParams.angle degrees from overhead -- or warm point
- * lights hanging in the room's sky (one per 640 px of room width).  Per
- * room, from the room's own collision grid (gUnk_02024ED0[slot], one byte
- * per 16x16 cell, an index into gCollisionAttributes), a map of one RG
- * texel per 8x8 world pixels is worked out by marching five rays from each
- * texel across the sun's angular disc or each light's disc: R = light
- * blocked (shadow, with a penumbra that widens with distance), G = light
- * arriving, then a small blur.  It is recomputed when the room changes, a
- * byte of its grid does (a block broken), or a map parameter does (at most
- * 5 times a second while a slider moves), so a frame costs a hash of at
- * most 1950 bytes.  The GL composite samples it bilinearly in world
- * coordinates (stable while the camera moves): shade darker and cooler,
- * lit areas warmer, the point lights' halo; the playfield fully, the
- * parallax art behind it at 55%; never the HUD.  With relief on (the
- * default), every sprite and layer pixel also has a normal, made each frame
- * on the GPU from the art itself (render/relief_glsl.h, a port of Sprite
- * Normals), and the sun or the lights shade it: slopes facing the light
- * brighter, turned away darker, flat art unchanged, none of it in shadow.
- * Outside the world framing, or outside Rainbow Route, the frame carries no
- * light map and the composite is the old one.  The PPU (software) path is not touched.
+ * Each area has an environment (kEnvs, by the area the game's own area map
+ * puts the room in, light_rooms.c): a sun -- or moon, or starlight -- with
+ * its direction and colours for rooms open to the sky, and point lights
+ * with their colours (torches, crystals, lava) for rooms that are not.  In
+ * the default Auto mode a room is "indoors" when most of its top row of
+ * cells is solid: the sun could not reach it.  Sun and Point lights force
+ * one or the other everywhere.
+ *
+ * The sun: parallel rays from beyond the top of the room at an angle from
+ * overhead (left positive).  Point lights: spread over the room's open air,
+ * one per ~480x360 px.  Per room, from the room's own collision grid
+ * (gUnk_02024ED0[slot], one byte per 16x16 cell, an index into
+ * gCollisionAttributes, at most 1950 cells), a map of one texel per 8x8
+ * world pixels is worked out by marching five rays from each texel across
+ * the sun's angular disc or each light's disc: R = light blocked (shadow,
+ * with a penumbra that widens with distance), G = light arriving, then a
+ * small blur.  It is recomputed when the room changes, a byte of its grid
+ * does (a block broken), or a map parameter does (at most 5 times a second
+ * while a slider moves).  The GL composite samples it bilinearly in world
+ * coordinates: shade darker and tinted, lit areas lifted, the point lights'
+ * halo; the playfield fully, the parallax art behind it at 55%; never the
+ * HUD.  Relief (render/relief_glsl.h) and the characters' shadows
+ * (gl_renderer.c RunCharShadow) use the same light.  The PPU (software)
+ * path is not touched.
  *
  * Runs at present time, outside the simulation, and only reads game memory.
  */
@@ -71,24 +73,75 @@ void PortLightResolve(void)
     gPortLighting = gPortLightingUser >= 0 ? gPortLightingUser : gPortLightingDefault;
 }
 
-/* Rainbow Route's rooms: the AREA_RAINBOW_ROUTE entries of the game's own
- * area-map table (game/src/pause_area_map.c, sAreaMapRoomInfos, static there,
- * so copied rather than linked -- 51 ids, no ROM bytes). */
-static const u16 kRainbowRooms[] = {
-    0x7e, 0x22d, 0xbe, 0xc2, 0x321, 0xb0, 0xc0, 0x24e, 0xb1, 0x217, 0x21a,
-    0x218, 0x219, 0x21e, 0x21f, 0x8d, 0x8f, 0x22c, 0x22b, 0x22a, 0x6c, 0x8c,
-    0x67, 0x68, 0x6b, 0x6a, 0x65, 0x6e, 0x1f7, 0x1fb, 0x89, 0x88, 0x7f,
-    0x1f8, 0xae, 0x77, 0x76, 0xad, 0xaf, 0xac, 0xab, 0x75, 0x73, 0x8b,
-    0x216, 0x23a, 0x23b, 0x214, 0x8a, 0xb2, 0x8e,
-};
+/* The environments, by enum AreaId (game/include/pause_area_map.h); a room
+ * the area map does not list takes Rainbow Route's.  Per environment: the
+ * sun's angle (degrees left of overhead; negative from the right) and two
+ * looks, for open rooms (sun) and enclosed ones (point lights): strength
+ * (x the Strength setting), lift of lit areas (x Warmth), shade tint at full
+ * Coolness, halo of the lights (x Glow), relief highlight.  Rainbow Route's
+ * open look is the one the lighting was first tuned with. */
+typedef struct LightLook {
+    float strength;
+    float lift[3], shade[3], halo[3], spec[3];
+} LightLook;
+typedef struct LightEnv {
+    const char *name;
+    float angle;
+    LightLook sun, cave;
+} LightEnv;
 
-static int IsRainbowRoute(u16 room)
+#define LOOK_DAY { 1.0f, { 0.45f, 0.25f, -0.08f }, { 0.90f, 0.95f, 1.20f }, \
+                   { 0.55f, 0.42f, 0.20f }, { 1.0f, 0.92f, 0.75f } }
+#define LOOK_TORCH { 1.0f, { 0.50f, 0.30f, 0.02f }, { 0.85f, 0.90f, 1.25f }, \
+                     { 0.60f, 0.42f, 0.18f }, { 1.0f, 0.85f, 0.60f } }
+static const LightEnv kEnvs[] = {
+    /* AREA_TUTORIAL */
+    { "day", 35.0f, LOOK_DAY, LOOK_TORCH },
+    /* AREA_RAINBOW_ROUTE: a warm day; torchlit caves */
+    { "day", 35.0f, LOOK_DAY, LOOK_TORCH },
+    /* AREA_MOONLIGHT_MANSION: moonlight from the upper right; candles inside */
+    { "moon", -30.0f,
+      { 0.85f, { 0.02f, 0.10f, 0.35f }, { 0.78f, 0.86f, 1.35f }, { 0.35f, 0.45f, 0.70f }, { 0.75f, 0.85f, 1.0f } },
+      { 1.0f, { 0.55f, 0.32f, 0.05f }, { 0.75f, 0.82f, 1.30f }, { 0.65f, 0.45f, 0.20f }, { 1.0f, 0.85f, 0.60f } } },
+    /* AREA_CABBAGE_CAVERN: a green day outside; crystal light below */
+    { "crystal cave", 30.0f,
+      { 1.0f, { 0.35f, 0.30f, 0.00f }, { 0.88f, 0.98f, 1.15f }, { 0.45f, 0.50f, 0.25f }, { 0.95f, 1.0f, 0.80f } },
+      { 1.0f, { 0.05f, 0.35f, 0.45f }, { 0.80f, 0.92f, 1.30f }, { 0.15f, 0.55f, 0.65f }, { 0.70f, 1.0f, 1.0f } } },
+    /* AREA_MUSTARD_MOUNTAIN: a hot orange sun; lava below */
+    { "volcano", 20.0f,
+      { 1.0f, { 0.55f, 0.18f, -0.12f }, { 1.05f, 0.88f, 1.05f }, { 0.70f, 0.35f, 0.10f }, { 1.0f, 0.75f, 0.50f } },
+      { 1.1f, { 0.60f, 0.20f, -0.10f }, { 0.95f, 0.80f, 1.10f }, { 0.75f, 0.30f, 0.05f }, { 1.0f, 0.60f, 0.30f } } },
+    /* AREA_CARROT_CASTLE: golden afternoon; torches in the halls */
+    { "castle", 40.0f,
+      { 1.0f, { 0.50f, 0.32f, 0.00f }, { 0.90f, 0.92f, 1.20f }, { 0.60f, 0.42f, 0.18f }, { 1.0f, 0.88f, 0.65f } },
+      LOOK_TORCH },
+    /* AREA_OLIVE_OCEAN: a bright sea sun; aqua glow in the grottoes */
+    { "sea", 25.0f,
+      { 1.0f, { 0.30f, 0.30f, 0.10f }, { 0.85f, 1.00f, 1.20f }, { 0.35f, 0.50f, 0.55f }, { 0.90f, 1.0f, 1.0f } },
+      { 1.0f, { 0.00f, 0.30f, 0.40f }, { 0.80f, 0.95f, 1.25f }, { 0.10f, 0.45f, 0.60f }, { 0.70f, 1.0f, 1.0f } } },
+    /* AREA_PEPPERMINT_PALACE: an icy sun; ice crystals inside */
+    { "ice", 30.0f,
+      { 1.0f, { 0.20f, 0.28f, 0.40f }, { 0.85f, 0.95f, 1.30f }, { 0.35f, 0.50f, 0.70f }, { 0.85f, 0.95f, 1.0f } },
+      { 1.0f, { 0.15f, 0.30f, 0.50f }, { 0.82f, 0.92f, 1.30f }, { 0.30f, 0.50f, 0.75f }, { 0.80f, 0.95f, 1.0f } } },
+    /* AREA_RADISH_RUINS: a high desert sun; amber torches in the ruins */
+    { "desert", 15.0f,
+      { 1.0f, { 0.55f, 0.40f, 0.00f }, { 0.92f, 0.92f, 1.15f }, { 0.65f, 0.48f, 0.15f }, { 1.0f, 0.95f, 0.70f } },
+      { 1.0f, { 0.55f, 0.38f, 0.02f }, { 0.85f, 0.88f, 1.20f }, { 0.65f, 0.45f, 0.10f }, { 1.0f, 0.88f, 0.55f } } },
+    /* AREA_CANDY_CONSTELLATION: starlight from the upper right; violet crystals */
+    { "stars", -40.0f,
+      { 0.85f, { 0.30f, 0.12f, 0.45f }, { 0.88f, 0.82f, 1.30f }, { 0.45f, 0.30f, 0.60f }, { 0.95f, 0.80f, 1.0f } },
+      { 1.0f, { 0.35f, 0.10f, 0.50f }, { 0.85f, 0.80f, 1.30f }, { 0.55f, 0.25f, 0.70f }, { 0.95f, 0.75f, 1.0f } } },
+    /* AREA_DIMENSION_MIRROR: mirror light from overhead; magenta crystals */
+    { "mirror", 0.0f,
+      { 0.9f, { 0.40f, 0.10f, 0.45f }, { 0.85f, 0.80f, 1.30f }, { 0.55f, 0.20f, 0.60f }, { 1.0f, 0.80f, 1.0f } },
+      { 1.0f, { 0.45f, 0.10f, 0.45f }, { 0.85f, 0.78f, 1.30f }, { 0.65f, 0.20f, 0.65f }, { 1.0f, 0.75f, 1.0f } } },
+};
+#define NUM_ENVS ((int)(sizeof(kEnvs) / sizeof(kEnvs[0])))
+
+static const LightEnv *EnvFor(u16 room)
 {
-    unsigned i;
-    for (i = 0; i < sizeof(kRainbowRooms) / sizeof(kRainbowRooms[0]); i++)
-        if (kRainbowRooms[i] == room)
-            return 1;
-    return 0;
+    int a = PortLightRoomArea(room);
+    return &kEnvs[a >= 0 && a < NUM_ENVS ? a : 1];
 }
 
 #define LIGHT_CELL 8                         /* world px per light texel    */
@@ -99,7 +152,12 @@ static int IsRainbowRoute(u16 room)
 /* The tunables are gPortLightParams (the settings menu's Lighting section;
  * natively KATAM_LIGHTING_STRENGTH / _MODE override strength and mode). */
 #define LIGHT_RANGE 560.0f                   /* px a light reaches          */
-#define LIGHT_SPACING 640                    /* px between a room's lights  */
+#define LIGHT_REGION_W 480                   /* px a room light looks after */
+#define LIGHT_REGION_H 360
+#define LIGHT_ROOM_MAX 16                    /* a room's lights, at most    */
+#define OPEN_LIT 0.45f                       /* sunlit share of the air: outdoors */
+#define CAVE_GAIN 1.6f                       /* point-lit: light -> no shade */
+#define CAVE_DARK 0.85f                      /* point-lit: shade far from all lights */
 #define SUN_REACH 320.0f                     /* px a sun ray is followed    */
 #define LIGHT_RAYS 5
 #define LIGHT_STEP 6.0f                      /* march step, px              */
@@ -121,8 +179,10 @@ static float sBuiltSoft = -1.0f, sBuiltAngle = -1.0f, sBuiltDepth = -1.0f;
 static const u8 *sGrid;          /* the room's grid the map was built from */
 static u32 sOccGen;              /* bumps when sOcc is worked out again     */
 static double sLastBuild;
-static float sLights[RL_MAX_LIGHTS][2];
+static float sLights[LIGHT_ROOM_MAX][2];
 static int sNumLights;
+static int sBuiltReq = -1;       /* the mode asked for (LIGHT_REQ_*)        */
+static const LightEnv *sEnv = &kEnvs[1];
 
 /* The moving sun.  sPhase runs 0..1 from sunrise (SUN_ARC degrees left of
  * overhead) to sunset (as far right), in wall-clock time at sunSpeed degrees
@@ -156,44 +216,66 @@ static int Occ(s32 x, s32 y, s32 cw, s32 ch)
     return o == 1 || (o == 2 && (y & 15) < 4);
 }
 
-/* Where the lights hang: one per LIGHT_SPACING px of room width, each in
- * the most open spot (most air in a 9x9-cell window, higher preferred) of
- * the upper half of the room near its column -- the sky of an outdoor room.
- * Anchored to the room, so shadows do not swim. */
+/* Where the lights hang: the room cut into regions of about
+ * LIGHT_REGION_W x LIGHT_REGION_H px, and in each with enough open air a
+ * light at its most open cell (most air in a 9x9-cell window, the upper
+ * part preferred) -- a cave's chambers, an outdoor room's sky.  Anchored to
+ * the room, so shadows do not swim. */
 static void PlaceLights(s32 cw, s32 ch)
 {
-    int i, n = (cw * 16 + LIGHT_SPACING - 1) / LIGHT_SPACING;
+    int nx = (cw * 16 + LIGHT_REGION_W - 1) / LIGHT_REGION_W;
+    int ny = (ch * 16 + LIGHT_REGION_H - 1) / LIGHT_REGION_H;
+    int rx, ry;
 
-    if (n < 1)
-        n = 1;
-    if (n > RL_MAX_LIGHTS)
-        n = RL_MAX_LIGHTS;
-    for (i = 0; i < n; i++) {
-        s32 c0 = n == 1 ? cw / 3 : (s32)(((2 * i + 1) * cw) / (2 * n));
-        s32 cx, cy, bx = c0, by = ch / 2, ymax = ch / 2 > 2 ? ch / 2 : 2;
-        float best = -1e9f;
+    sNumLights = 0;
+    if (nx < 1) nx = 1;
+    if (ny < 1) ny = 1;
+    for (ry = 0; ry < ny; ry++)
+        for (rx = 0; rx < nx && sNumLights < LIGHT_ROOM_MAX; rx++) {
+            s32 x0 = rx * cw / nx, x1 = (rx + 1) * cw / nx;
+            s32 y0 = ry * ch / ny, y1 = (ry + 1) * ch / ny;
+            s32 cx, cy, bx = -1, by = -1;
+            float best = -1e9f;
+            int bestAir = 0;
 
-        for (cy = 1; cy <= ymax && cy < ch; cy++)
-            for (cx = c0 - 5; cx <= c0 + 5; cx++) {
-                int air = 0, x, y;
-                float score;
-                if (cx < 0 || cx >= cw || sOcc[cy * cw + cx] != 0)
-                    continue;
-                for (y = cy - 4; y <= cy + 4; y++)
-                    for (x = cx - 4; x <= cx + 4; x++)
-                        if (x >= 0 && y >= 0 && x < cw && y < ch && sOcc[y * cw + x] == 0)
-                            air++;
-                score = air - 0.6f * cy - 0.3f * (cx > c0 ? cx - c0 : c0 - cx);
-                if (score > best) {
-                    best = score;
-                    bx = cx;
-                    by = cy;
+            for (cy = y0; cy < y1; cy++)
+                for (cx = x0; cx < x1; cx++) {
+                    int air = 0, x, y;
+                    float score;
+                    if (sOcc[cy * cw + cx] != 0)
+                        continue;
+                    for (y = cy - 4; y <= cy + 4; y++)
+                        for (x = cx - 4; x <= cx + 4; x++)
+                            if (x >= 0 && y >= 0 && x < cw && y < ch && sOcc[y * cw + x] == 0)
+                                air++;
+                    score = air - 0.4f * (float)(cy - y0)
+                          - 0.2f * fabsf((float)cx - 0.5f * (float)(x0 + x1));
+                    if (score > best) {
+                        best = score;
+                        bestAir = air;
+                        bx = cx;
+                        by = cy;
+                    }
                 }
-            }
-        sLights[i][0] = bx * 16 + 8;
-        sLights[i][1] = by * 16 + 8;
-    }
-    sNumLights = n;
+            if (bx < 0 || bestAir < 30)
+                continue;               /* (nearly) solid: no light here   */
+            sLights[sNumLights][0] = bx * 16 + 8;
+            sLights[sNumLights][1] = by * 16 + 8;
+            sNumLights++;
+        }
+}
+
+/* The collision attribute of a grid byte as the march sees it. */
+static u8 CellOcc(u8 g)
+{
+    u32 a = gCollisionAttributes[g];
+    if (a & 0x200)
+        return 1;
+    if ((a >> 28) != 0 && !(a & 1))
+        return 1;                       /* a slope: count it solid         */
+    if (a & 0x4)
+        return 2;                       /* jump-through platform           */
+    return 0;
 }
 
 /* How far into solid ground light reaches, in march steps: a ray that starts
@@ -325,10 +407,42 @@ static void BuildPoints(s32 cw, s32 ch, s32 mw, s32 mh)
                 sh += (1.0f - v) * fade;
                 li += v * att * att;
             }
-            sTmp[(ty * mw + tx) * 2] = sh > 1.0f ? 1.0f : sh;
-            sTmp[(ty * mw + tx) * 2 + 1] = li > 1.0f ? 1.0f : li;
+            /* Indoors the dark is where the light does not reach: shade by
+             * the light missing (blocked or too far), dim but not black
+             * away from every light. */
+            (void)sh;
+            li = li > 1.0f ? 1.0f : li;
+            sh = 1.0f - li * CAVE_GAIN;
+            sTmp[(ty * mw + tx) * 2] = (sh < 0.0f ? 0.0f : sh) * CAVE_DARK;
+            sTmp[(ty * mw + tx) * 2 + 1] = li;
         }
     }
+}
+
+/* Sun or point lights for this room: what was asked for, or (Auto) the
+ * sun if it would light enough of the room's open air -- the room's sun map
+ * is worked out (into sTmp) and its sunlit share of air cells measured.  A
+ * cave, a hall under a roof, is lit by its lights instead. */
+static int DecideMode(const u8 *grid, s32 cw, s32 ch, int req, float angle)
+{
+    s32 mw = (cw * 16) / LIGHT_CELL, mh = (ch * 16) / LIGHT_CELL, tx, ty, i;
+    float lit = 0.0f;
+    int air = 0;
+
+    if (req == LIGHT_REQ_SUN)
+        return RL_LIGHT_SUN;
+    if (req == LIGHT_REQ_POINT)
+        return RL_LIGHT_POINT;
+    for (i = 0; i < cw * ch; i++)
+        sOcc[i] = CellOcc(grid[i]);
+    BuildSun(cw, ch, mw, angle, 0, mh);
+    for (ty = 0; ty < mh; ty++)
+        for (tx = 0; tx < mw; tx++)
+            if (sOcc[(ty * LIGHT_CELL / 16) * cw + tx * LIGHT_CELL / 16] == 0) {
+                air++;
+                lit += 1.0f - sTmp[(ty * mw + tx) * 2];
+            }
+    return air > 0 && lit >= OPEN_LIT * (float)air ? RL_LIGHT_SUN : RL_LIGHT_POINT;
 }
 
 /* The 3x3 box blur of sTmp, into the current map. */
@@ -368,29 +482,21 @@ static void BakePrev(s32 mw, s32 mh, float mix)
     }
 }
 
-static void Build(const u8 *grid, s32 cw, s32 ch, float angle)
+static void Build(const u8 *grid, s32 cw, s32 ch, float angle, int mode)
 {
     s32 mw = (cw * 16) / LIGHT_CELL, mh = (ch * 16) / LIGHT_CELL;
     s32 i;
 
-    for (i = 0; i < cw * ch; i++) {
-        u32 a = gCollisionAttributes[grid[i]];
-        if (a & 0x200)
-            sOcc[i] = 1;
-        else if ((a >> 28) != 0 && !(a & 1))
-            sOcc[i] = 1;                     /* a slope: count it solid     */
-        else if (a & 0x4)
-            sOcc[i] = 2;                     /* jump-through platform       */
-        else
-            sOcc[i] = 0;
-    }
-    if (gPortLightParams.mode == RL_LIGHT_POINT) {
+    for (i = 0; i < cw * ch; i++)
+        sOcc[i] = CellOcc(grid[i]);
+    if (mode == RL_LIGHT_POINT) {
         BuildPoints(cw, ch, mw, mh);
     } else {
         BuildSun(cw, ch, mw, angle, 0, mh);
         sNumLights = 0;
     }
-    sBuiltMode = gPortLightParams.mode;
+    sBuiltMode = mode;
+    sBuiltReq = gPortLightParams.mode;
     sBuiltSoft = gPortLightParams.soft;
     sBuiltDepth = gPortLightParams.depth;
     sGrid = grid;
@@ -444,31 +550,62 @@ static void SunStep(float target, double now)
 
 static void Attach(RlFrame *f, int roomBg);
 
+/* The frame's environment colours and its lights: the room's nearest
+ * RL_MAX_LIGHTS to the view's centre. */
+static void FrameLook(RlFrame *f)
+{
+    const LightLook *L = sBuiltMode == RL_LIGHT_POINT ? &sEnv->cave : &sEnv->sun;
+    float cx = (float)(f->camX + f->viewX) + f->viewW * 0.5f;
+    float cy = (float)(f->camY + f->viewY) + f->viewH * 0.5f;
+    float d[LIGHT_ROOM_MAX];
+    int used[LIGHT_ROOM_MAX];
+    int i, k, n = 0;
+
+    memcpy(f->envLift, L->lift, sizeof(f->envLift));
+    memcpy(f->envShade, L->shade, sizeof(f->envShade));
+    memcpy(f->envHalo, L->halo, sizeof(f->envHalo));
+    memcpy(f->envSpec, L->spec, sizeof(f->envSpec));
+    f->lightMode = (u8)sBuiltMode;
+    for (i = 0; i < sNumLights; i++) {
+        float dx = sLights[i][0] - cx, dy = sLights[i][1] - cy;
+        d[i] = dx * dx + dy * dy;
+        used[i] = 0;
+    }
+    while (n < RL_MAX_LIGHTS && n < sNumLights) {
+        int best = -1;
+        for (k = 0; k < sNumLights; k++)
+            if (!used[k] && (best < 0 || d[k] < d[best]))
+                best = k;
+        used[best] = 1;
+        f->lights[n][0] = sLights[best][0];
+        f->lights[n][1] = sLights[best][1];
+        n++;
+    }
+    f->numLights = (u8)n;
+}
+
 /* A frame shown again (the menu's pause, a frozen frame): the look's
  * parameters as they are now, so a change shows on the same picture.  The
  * map and the sun's place stay as built. */
 void PortLightRefreshParams(RlFrame *f)
 {
     const PortLightParams *P = &gPortLightParams;
-    int anim = P->mode == RL_LIGHT_SUN && P->sunAnim, i;
+    int anim = sBuiltMode == RL_LIGHT_SUN && P->sunAnim;
+    float base = P->mode == LIGHT_REQ_SUN ? P->angle : sEnv->angle;
 
     if (!f || !f->light)
         return;
     /* A map parameter changed on a held frame: build the map again from
      * the same room's grid (the game is not running, so it is the same). */
     if (sGrid && f->light == sMask
-        && (P->mode != sBuiltMode || P->soft != sBuiltSoft || P->depth != sBuiltDepth
-            || (P->mode == RL_LIGHT_SUN && !anim && P->angle != sBuiltAngle))) {
-        Build(sGrid, sCw, sCh, anim ? sCurAngle : P->angle);
+        && (P->mode != sBuiltReq || P->soft != sBuiltSoft || P->depth != sBuiltDepth
+            || (sBuiltMode == RL_LIGHT_SUN && !anim && base != sBuiltAngle))) {
+        Build(sGrid, sCw, sCh, anim ? sCurAngle : base,
+              DecideMode(sGrid, sCw, sCh, P->mode, sEnv->angle));
         f->lightGen = sGen;
-        f->lightMode = (u8)sBuiltMode;
         f->lightMix = 1.0f;
         f->lightAngle = sCurAngle;
-        f->numLights = (u8)sNumLights;
-        for (i = 0; i < sNumLights; i++) {
-            f->lights[i][0] = sLights[i][0];
-            f->lights[i][1] = sLights[i][1];
-        }
+        FrameLook(f);
     }
     f->lightCharReach = P->charReach;
     f->lightCharDepth = P->charDepth;
@@ -483,8 +620,9 @@ void PortLightRefreshParams(RlFrame *f)
     f->lightShadow = gPortLightParams.shadow;
     f->lightCool = gPortLightParams.cool;
     f->lightGlow = gPortLightParams.glow;
-    if (!(gPortLightParams.mode == RL_LIGHT_SUN && gPortLightParams.sunAnim))
-        f->lightK = gPortLightParams.strength;
+    if (!(sBuiltMode == RL_LIGHT_SUN && gPortLightParams.sunAnim))
+        f->lightK = gPortLightParams.strength * (sBuiltMode == RL_LIGHT_POINT ? sEnv->cave.strength
+                                                                             : sEnv->sun.strength);
 }
 
 /* With KATAM_LIGHTING_LOG: the mean CPU cost of a frame's attach (the grid
@@ -519,7 +657,8 @@ static void Attach(RlFrame *f, int roomBg)
     s32 cw, ch, n, i;
     u32 h = 2166136261u;
     double now;
-    int anim;
+    int anim, mode;
+    const LightEnv *env;
     float target, shown, warmK = 1.0f;
 
     f->light = NULL;
@@ -533,7 +672,8 @@ static void Attach(RlFrame *f, int roomBg)
             gPortLightParams.strength = (float)atof(e);
         e = getenv("KATAM_LIGHTING_MODE");
         if (e)
-            gPortLightParams.mode = (e[0] == 'p') ? RL_LIGHT_POINT : RL_LIGHT_SUN;
+            gPortLightParams.mode = e[0] == 'p' ? LIGHT_REQ_POINT
+                                  : e[0] == 's' ? LIGHT_REQ_SUN : LIGHT_REQ_AUTO;
         e = getenv("KATAM_LIGHTING_RELIEF");
         if (e)
             gPortLightParams.relief = (float)atof(e);
@@ -543,7 +683,7 @@ static void Attach(RlFrame *f, int roomBg)
         sEnvDone = 1;
     }
     li = &gCurLevelInfo[gLocalPlayerId];
-    if (li->currentRoom == 0xFFFF || !IsRainbowRoute(li->currentRoom) || li->unk65E > 3)
+    if (li->currentRoom == 0xFFFF || li->unk65E > 3)
         return;
     cw = li->roomWidth / 16;
     ch = li->roomHeight / 16;
@@ -556,7 +696,12 @@ static void Attach(RlFrame *f, int roomBg)
         h = (h ^ grid[i]) * 16777619u;
     h ^= (u32)cw << 16;
     now = NowMs();
-    anim = gPortLightParams.mode == RL_LIGHT_SUN && gPortLightParams.sunAnim;
+    env = EnvFor(li->currentRoom);
+    /* Sun or lights: decided when the room (or the asked-for mode) is new. */
+    mode = (!sHave || li->currentRoom != sRoom || h != sGridHash
+            || gPortLightParams.mode != sBuiltReq)
+           ? DecideMode(grid, cw, ch, gPortLightParams.mode, env->angle) : sBuiltMode;
+    anim = mode == RL_LIGHT_SUN && gPortLightParams.sunAnim;
     {
         /* The day's clock: wall time, not frames (a 120 Hz display presents
          * twice as often), and a long gap (a hidden tab) is not a jump. */
@@ -568,22 +713,25 @@ static void Attach(RlFrame *f, int roomBg)
             sPhase += (float)(dt / 1000.0) * gPortLightParams.sunSpeed / (2.0f * SUN_ARC);
             sPhase -= floorf(sPhase);
         }
-        target = anim ? SUN_ARC - 2.0f * SUN_ARC * sPhase : gPortLightParams.angle;
+        target = anim ? SUN_ARC - 2.0f * SUN_ARC * sPhase
+               : gPortLightParams.mode == LIGHT_REQ_SUN ? gPortLightParams.angle : env->angle;
     }
     {
         /* A changed map parameter (a menu slider): rebuild at most 5 times a
          * second while it moves, and once more when it settles.  The moving
          * sun's angle is the pipeline's business (SunStep). */
         const PortLightParams *P = &gPortLightParams;
-        int stale = P->mode != sBuiltMode || P->soft != sBuiltSoft || P->depth != sBuiltDepth
-                    || (P->mode == RL_LIGHT_SUN && !anim && P->angle != sBuiltAngle);
+        int stale = P->mode != sBuiltReq || mode != sBuiltMode || P->soft != sBuiltSoft
+                    || P->depth != sBuiltDepth
+                    || (mode == RL_LIGHT_SUN && !anim && target != sBuiltAngle);
         if (stale && now - sLastBuild >= 200.0)
             sHave = 0;
     }
     if (!sHave || li->currentRoom != sRoom || h != sGridHash) {
         double t0 = NowMs();
         sLastBuild = t0;
-        Build(grid, cw, ch, target);
+        sEnv = env;
+        Build(grid, cw, ch, target, mode);
         gPortLightBuildMs = NowMs() - t0;
         if (getenv("KATAM_LIGHTING_LOG"))
             fprintf(stderr, "[katam-port] light: room %u %dx%d cells -> %dx%d map, %s, %d lights, in %.2f ms\n",
@@ -618,7 +766,8 @@ static void Attach(RlFrame *f, int roomBg)
     f->lightH = sMaskH;
     f->lightGen = sGen;
     f->lightLayers = (u8)(1u << roomBg);
-    f->lightK = gPortLightParams.strength;
+    f->lightK = gPortLightParams.strength * (sBuiltMode == RL_LIGHT_POINT ? sEnv->cave.strength
+                                                                         : sEnv->sun.strength);
     f->lightMix = sMix;
     f->lightSunSide = sinf(shown * 3.14159265f / 180.0f) / sinf(35.0f * 3.14159265f / 180.0f);
     if (f->lightSunSide > 1.0f) f->lightSunSide = 1.0f;
@@ -632,7 +781,6 @@ static void Attach(RlFrame *f, int roomBg)
         f->lightK *= e * e * (3.0f - 2.0f * e);
         warmK = 1.0f + 0.8f * low * low;
     }
-    f->lightMode = (u8)sBuiltMode;
     f->lightShadow = gPortLightParams.shadow;
     f->lightWarm = gPortLightParams.warmth * warmK;
     f->lightCool = gPortLightParams.cool;
@@ -651,9 +799,5 @@ static void Attach(RlFrame *f, int roomBg)
     f->lightOccH = sCh;
     f->lightOccGen = sOccGen;
     f->lightReliefBg = (u8)gPortLightParams.reliefBg;
-    f->numLights = (u8)sNumLights;
-    for (i = 0; i < sNumLights; i++) {
-        f->lights[i][0] = sLights[i][0];
-        f->lights[i][1] = sLights[i][1];
-    }
+    FrameLook(f);
 }

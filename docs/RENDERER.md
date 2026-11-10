@@ -384,9 +384,30 @@ per-present camera step in game pixels, jumps excluded):
 ## Lighting and relief (branch `lighting`)
 
 Off unless asked for: the page at `/lighting/`, `?lighting=1`, or
-`KATAM_LIGHTING=1`; Rainbow Route rooms only; GPU renderer only.
+`KATAM_LIGHTING=1`; every level; GPU renderer only.
 `platform/render/light.c` builds a per-room shadow map from the collision grid
 (its header has the details) and the composite tints world pixels with it.
+
+Each area has an environment (`kEnvs` in light.c, by the area the game's own
+area map gives the room -- `platform/render/light_rooms.c`, falling back to the
+room header's area byte for the tutorial and the Dimension Mirror): a sun's
+direction and look for open rooms and a point-light look for enclosed ones --
+day and torches (Rainbow Route), moonlight and candles (Moonlight Mansion), a
+green day and crystal light (Cabbage Cavern), an orange sun and lava (Mustard
+Mountain), golden afternoon (Carrot Castle), sea sun and aqua grottoes (Olive
+Ocean), ice (Peppermint Palace), desert sun and amber torches (Radish Ruins),
+starlight and violet crystals (Candy Constellation), mirror light and magenta
+crystals (Dimension Mirror).  The renderer takes the colours from the frame
+(`envLift`, `envShade`, `envHalo`, `envSpec`).
+
+Settings > Lighting *Auto* (the default) decides per room: the area's sun map
+is built and, if it lights under 45% of the room's open air, the room is lit
+by its point lights instead -- placed in the open air of each ~480x360 px of
+the room, the nearest 8 sent each frame.  Indoors the shade is the light that
+does not arrive (dim far from every light), not light blocked.  *Sun* and
+*Point lights* force one everywhere (the sun angle slider applies with Sun).
+Saved lighting settings from before `LIGHT_SETTINGS_VER` 3 are reset to the
+defaults once.
 
 The sun can cross the sky (Settings > Lighting > *Sun crosses the sky*, on
 by default; *Sun speed* in degrees a second): sunrise far left to sunset far

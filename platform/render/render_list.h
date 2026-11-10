@@ -248,9 +248,12 @@ const RlFrame *PortRlCurrentFrame(void);
  * natively KATAM_LIGHTING=1; -1 = read the env).  PortLightResolve works it
  * out again after either changes.  PortLightAttach sets f->light for a
  * Rainbow Route world frame, NULL otherwise. */
-enum { RL_LIGHT_SUN = 0, RL_LIGHT_POINT = 1 };
+enum { RL_LIGHT_SUN = 0, RL_LIGHT_POINT = 1 };          /* what a frame uses */
+/* What the settings ask for: by the room (open sky: the area's sun;
+ * enclosed: its point lights), or one of them everywhere. */
+enum { LIGHT_REQ_AUTO = 0, LIGHT_REQ_SUN = 1, LIGHT_REQ_POINT = 2 };
 typedef struct PortLightParams {
-    int mode;           /* RL_LIGHT_*                                       */
+    int mode;           /* LIGHT_REQ_*                                      */
     float strength;     /* the whole effect, 0..3                           */
     float shadow;       /* how dark full shade is, 0..0.8                   */
     float soft;         /* sun disc / light size: the penumbra, 0..1        */
@@ -271,8 +274,8 @@ typedef struct PortLightParams {
     float charDepth;    /* ... and into solid ground, px 0..48              */
     int reliefOn;       /* normal maps at all (relief, shine): 0 none       */
 } PortLightParams;
-#define PORT_LIGHT_PARAMS_DEFAULT { RL_LIGHT_SUN, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
-                                    1.0f, 0.10f, 0.8f, 1, 5.0f, 1.0f, 0, 12.0f, 64.0f, 6.0f, 1 }
+#define PORT_LIGHT_PARAMS_DEFAULT { LIGHT_REQ_AUTO, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
+                                    0.5f, 0.10f, 0.8f, 0, 5.0f, 1.0f, 0, 3.0f, 16.0f, 3.0f, 1 }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
 /* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);
