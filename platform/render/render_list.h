@@ -132,7 +132,7 @@ typedef struct RlHudRegion {
 #define RL_LINE_BGCNT   27   /* 4 words */
 #define RL_LINE_AFFB    32   /* pb2 pd2 pb3 pd3 */
 
-#define RL_MAX_LIGHTS 4
+#define RL_MAX_LIGHTS 8         /* point lights a frame carries (the nearest) */
 
 typedef struct RlFrame {
     u32 serial;              /* bumps every built frame                      */
@@ -194,6 +194,12 @@ typedef struct RlFrame {
     float lightRelief, lightShine, lightHeight, lightAngle;
     u8 lightNrmView;         /* 1: show the normals instead of the picture   */
     float lightMix;          /* previous -> current map, 0..1                 */
+    /* The environment's colours (light.c, per area; docs/RENDERER.md):
+     * lit areas are lifted by warmth x envLift, shade is tinted towards
+     * envShade at full coolness, point lights glow envHalo, relief
+     * highlights are envSpec.  Rainbow Route's: (0.45 0.25 -0.08),
+     * (0.90 0.95 1.20), (0.55 0.42 0.20), (1.0 0.92 0.75). */
+    float envLift[3], envShade[3], envHalo[3], envSpec[3];
     float lightSunSide;      /* -1 sun on the right .. 1 on the left (35 deg) */
     float lightSprShadow;    /* characters' shadows: strength, 0 none         */
     float lightSoft;         /* penumbra, 0..1 (PortLightParams.soft)         */
@@ -276,6 +282,9 @@ extern double gPortLightBuildMs;
 void PortLightResolve(void);
 void PortLightAttach(RlFrame *f, int roomBg);
 void PortLightRefreshParams(RlFrame *f);
+/* The area a room belongs to (enum AreaId, game/include/pause_area_map.h),
+ * or -1 if the area map does not list it (platform/render/light_rooms.c). */
+int PortLightRoomArea(u16 room);
 
 /* The last frame built, for showing on a display finer than the game's pixel
  * grid and faster than its 59.73 Hz.  Presentation only: the result is a
