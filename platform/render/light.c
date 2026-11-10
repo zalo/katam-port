@@ -236,7 +236,6 @@ static void PlaceLights(s32 cw, s32 ch)
             s32 y0 = ry * ch / ny, y1 = (ry + 1) * ch / ny;
             s32 cx, cy, bx = -1, by = -1;
             float best = -1e9f;
-            int bestAir = 0;
 
             for (cy = y0; cy < y1; cy++)
                 for (cx = x0; cx < x1; cx++) {
@@ -248,16 +247,17 @@ static void PlaceLights(s32 cw, s32 ch)
                         for (x = cx - 4; x <= cx + 4; x++)
                             if (x >= 0 && y >= 0 && x < cw && y < ch && sOcc[y * cw + x] == 0)
                                 air++;
+                    if (air < 30)
+                        continue;       /* too enclosed to hang a light     */
                     score = air - 0.4f * (float)(cy - y0)
                           - 0.2f * fabsf((float)cx - 0.5f * (float)(x0 + x1));
                     if (score > best) {
                         best = score;
-                        bestAir = air;
                         bx = cx;
                         by = cy;
                     }
                 }
-            if (bx < 0 || bestAir < 30)
+            if (bx < 0)
                 continue;               /* (nearly) solid: no light here   */
             sLights[sNumLights][0] = bx * 16 + 8;
             sLights[sNumLights][1] = by * 16 + 8;
@@ -602,9 +602,18 @@ void PortLightRefreshParams(RlFrame *f)
             || (sBuiltMode == RL_LIGHT_SUN && !anim && base != sBuiltAngle))) {
         Build(sGrid, sCw, sCh, anim ? sCurAngle : base,
               DecideMode(sGrid, sCw, sCh, P->mode, sEnv->angle));
+    }
+    /* Every time, not only after a rebuild: the presented frame is copied
+     * from the built one on each present, which brings back the fields of
+     * the map it was built with. */
+    if (sGrid && f->light == sMask) {
+        float shown = sPrevAngle + (sCurAngle - sPrevAngle) * sMix;
         f->lightGen = sGen;
-        f->lightMix = 1.0f;
-        f->lightAngle = sCurAngle;
+        f->lightMix = sMix;
+        f->lightAngle = shown;
+        f->lightSunSide = sinf(shown * 3.14159265f / 180.0f) / sinf(35.0f * 3.14159265f / 180.0f);
+        if (f->lightSunSide > 1.0f) f->lightSunSide = 1.0f;
+        if (f->lightSunSide < -1.0f) f->lightSunSide = -1.0f;
         FrameLook(f);
     }
     f->lightCharReach = P->charReach;

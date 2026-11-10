@@ -48,9 +48,9 @@ typedef struct PortSettings {
     float uiScale;      /* menu size multiplier, 1.0 = automatic            */
     int smoothCam;      /* GPU: the camera at the game's sub-pixel position */
     int interp;         /* GPU: lerp between sim frames at display rate     */
-    /* Lighting (GPU renderer, Rainbow Route; platform/render/light.c). */
+    /* Lighting (GPU renderer, every level; platform/render/light.c). */
     int lightOn;        /* -1 the page's default (/lighting/), 0 off, 1 on   */
-    int lightMode;      /* RL_LIGHT_SUN / RL_LIGHT_POINT                    */
+    int lightMode;      /* LIGHT_REQ_AUTO / _SUN / _POINT                   */
     float lightStrength, lightShadow, lightSoft, lightAngle, lightWarm,
           lightCool, lightGlow;   /* PortLightParams                        */
     float lightRelief, lightShine, lightHeight;   /* ... normal maps        */

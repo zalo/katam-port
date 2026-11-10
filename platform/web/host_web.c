@@ -164,7 +164,7 @@ void PortHostInit(int argc, char **argv)
     gPortReliefView = PortWebNormalsParam();
     PortLightResolve();
     if (gPortLighting)
-        PortLog("[katam-port] lighting: on (Rainbow Route sunlight, proof of concept; Settings > Display > Lighting)");
+        PortLog("[katam-port] lighting: on (every level, proof of concept; Settings > Display > Lighting)");
     if (PortWebHaveGlCanvas())
         PortWebGlInit();
 }
