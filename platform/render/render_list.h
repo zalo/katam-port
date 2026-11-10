@@ -263,9 +263,10 @@ typedef struct PortLightParams {
     float depth;        /* how far light reaches into solid ground, px 0..48 */
     float charReach;    /* how far a character's shadow reaches, px 16..160  */
     float charDepth;    /* ... and into solid ground, px 0..48              */
+    int reliefOn;       /* normal maps at all (relief, shine): 0 none       */
 } PortLightParams;
 #define PORT_LIGHT_PARAMS_DEFAULT { RL_LIGHT_SUN, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
-                                    1.0f, 0.10f, 0.8f, 1, 5.0f, 1.0f, 0, 12.0f, 64.0f, 6.0f }
+                                    1.0f, 0.10f, 0.8f, 1, 5.0f, 1.0f, 0, 12.0f, 64.0f, 6.0f, 1 }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
 /* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);

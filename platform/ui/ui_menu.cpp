@@ -625,6 +625,14 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##lg", &s.lightGlow, 0.0f, 2.0f, "Glow (point lights) %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::EndDisabled();
         /* Normal maps from the art itself (render/relief_glsl.h). */
+        {
+            bool nm = s.lightReliefOn != 0;
+            if (ImGui::Checkbox("Normal maps (relief and shine)", &nm)) {
+                s.lightReliefOn = nm ? 1 : 0;
+                changed = 1;
+            }
+        }
+        ImGui::BeginDisabled(!s.lightReliefOn);
         changed |= ImGui::SliderFloat("##lr", &s.lightRelief, 0.0f, 2.0f, "Relief (normal maps) %.2f", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightRelief <= 0.0f);
         {
@@ -636,6 +644,7 @@ static int PageDisplay(void)
         }
         changed |= ImGui::SliderFloat("##lh", &s.lightShine, 0.0f, 1.0f, "Shine %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lz", &s.lightHeight, 0.2f, 2.0f, "Light height %.2f", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
         ImGui::EndDisabled();
         changed |= ImGui::SliderFloat("##ld", &s.lightSprShadow, 0.0f, 1.0f, "Character shadows %.2f (0 off)", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightSprShadow <= 0.0f);
@@ -665,6 +674,7 @@ static int PageDisplay(void)
             s.lightDepth = d.lightDepth;
             s.lightCharReach = d.lightCharReach;
             s.lightCharDepth = d.lightCharDepth;
+            s.lightReliefOn = d.lightReliefOn;
             changed = 1;
         }
         ImGui::EndDisabled();

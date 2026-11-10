@@ -459,7 +459,7 @@ clipped to white.  Sprites therefore use detail strength 2, stay within
 0.72-1.25 of their own colour, and brighten without leaving their hue; the
 puffed-up Kirby keeps its dome and highlight.  `tools/relief_check/tune.html`
 was used to choose this on real sprites.  Settings > Display >
-Lighting: **Relief** (0 turns it off and skips the passes), **Shine**,
+Lighting: **Normal maps** (one switch for all of it: no passes when off), **Relief**, **Shine**,
 **Light height** (shine 0.1 by default).  `?normals=1` (`KATAM_RELIEF_VIEW=1`) shows the normal maps
 instead of the picture; `?normals=2` and `=3` show the atlas's sprite groups
 and their normals, pixel for pixel.  For comparing looks on one picture:
