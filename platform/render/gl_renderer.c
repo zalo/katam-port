@@ -129,6 +129,7 @@ static GLint uCView, uCContent, uCLayer, uCValid, uCMapGeom, uCMapScroll,
              uCNumHud, uCHudRect, uCHudD;
 static GLint uCLight, uCLightGeom, uCLightK, uCLights, uCNumLights, uCLightP, uCLightMode,
              uCLightMix, uCSunSide, uCCharShP;
+static GLint uCEnvLift, uCEnvShade, uCEnvHalo, uCEnvSpec;
 static GLuint sTexLight;
 static int sLightW, sLightH;
 static u32 sLightGen;
@@ -300,6 +301,9 @@ static const char *kObjFs =
  * (opaque, not HUD); a blocked ray counts less the further away its sprite
  * is, so a shadow is darkest at the feet and its edge widens with distance. */
 #define CHARSH_CELL 2
+/* The point lights' arrays and loops in the shaders, sized from RL_MAX_LIGHTS
+ * so the two cannot drift apart (RELIEF_STR: relief_glsl.h). */
+#define NLIGHTS_STR RELIEF_STR(RL_MAX_LIGHTS)
 static const char *kCharShFs =
     "precision highp sampler2D;\n"
     "uniform highp usampler2D uObjT;\n"
@@ -308,7 +312,7 @@ static const char *kCharShFs =
     "uniform int uMode;\n"           /* 0 sun, 1 point lights             */
     "uniform vec2 uSunA;\n"          /* angle left of overhead, disc (rad) */
     "uniform int uNumL;\n"
-    "uniform vec2 uLv[4];\n"         /* the lights, view px               */
+    "uniform vec2 uLv[" NLIGHTS_STR "];\n" /* the lights, view px          */
     "uniform float uDisc;\n"         /* a point light's half size, px     */
     "uniform float uReach;\n"        /* how far a shadow reaches, px      */
     "uniform highp usampler2D uOccT;\n" /* the room's collision cells (light.c) */
@@ -359,7 +363,7 @@ static const char *kCharShFs =
     "    }\n"
     "    sh /= 5.0;\n"
     "  } else {\n"
-    "    for (int i = 0; i < 4; i++) {\n"
+    "    for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
     "      if (i >= uNumL) break;\n"
     "      vec2 L = uLv[i] - p;\n"
     "      float dist = length(L), b = 0.0;\n"
@@ -402,12 +406,17 @@ static const char *kCompFs =
     "uniform ivec4 uLightGeom;\n"    /* camX camY mapW mapH (texels)       */
     "uniform sampler2D uShadow;\n"
     "uniform float uLightK;\n"      /* strength                            */
-    "uniform vec2 uLights[4];\n"    /* the lights, world px (their halo)  */
+    "uniform vec2 uLights[" NLIGHTS_STR "];\n" /* the lights, world px (their halo) */
     "uniform int uNumLights;\n"
     "uniform vec4 uLightP;\n"       /* shadow darkness, warmth, cool, glow */
     "uniform int uLightMode;\n"     /* 0 sun, 1 point lights              */
     "uniform float uLightMix;\n"    /* the map's previous (rg) -> current (ba) */
     "uniform float uSunSide;\n"     /* -1 sun on the right .. 1 on the left  */
+    /* The environment's colours (RlFrame.env*, light.c, per area). */
+    "uniform vec3 uEnvLift;\n"     /* lit areas: x warmth                 */
+    "uniform vec3 uEnvShade;\n"    /* shade's tint at full coolness       */
+    "uniform vec3 uEnvHalo;\n"     /* the point lights' glow              */
+    "uniform vec3 uEnvSpec;\n"     /* relief highlights                   */
     /* Character shadows (RunCharShadow): one texel per CHARSH_CELL view px. */
     "uniform highp sampler2D uCharSh;\n"
     "uniform vec4 uCharShP;\n"      /* strength, cell px, texture w, h      */
@@ -696,7 +705,7 @@ static const char *kCompFs =
     "      if (uNrmView == 4) { oColor = vec4(col * 0.3 + vec3(1.0 - sl.r) * 0.7, 1.0); return; }\n"
     "      float lum = dot(col, vec3(0.30, 0.59, 0.11));\n"
     /* Shade: darker by uLightP.x, bluer by uLightP.z, at full shadow x K. */
-    "      vec3 shadeC = (1.0 - uLightP.x) * mix(vec3(1.0), vec3(0.90, 0.95, 1.20), uLightP.z);\n"
+    "      vec3 shadeC = (1.0 - uLightP.x) * mix(vec3(1.0), uEnvShade, uLightP.z);\n"
     /* The playfield (the room layer, sprites) takes the full shade; the
      * parallax art behind it, far off, 55% of it. */
     "      float plane = (top == 4 || (top >= 0 && ((uLight >> top) & 1) != 0)) ? 1.0 : 0.55;\n"
@@ -715,7 +724,7 @@ static const char *kCompFs =
     "          float lit = 1.0 - sl.r;\n"
     "          if (uLightMode == 1) {\n"
     "            vec3 acc = vec3(0.0);\n"
-    "            for (int i = 0; i < 4; i++) {\n"
+    "            for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
     "              if (i >= uNumLights) break;\n"
     "              vec2 d = uLights[i] - wp;\n"
     "              float att = max(1.0 - length(d) / 560.0, 0.0);\n"
@@ -741,7 +750,7 @@ static const char *kCompFs =
     "          }\n"
     "          vec3 Hv = normalize(Ld + vec3(0.0, 0.0, 1.0));\n"
     "          float sp = max(pow(max(dot(N, Hv), 0.0), 20.0) - pow(Hv.z, 20.0), 0.0);\n"
-    "          col += K * uRelief.y * lit * plane * sp * vec3(1.0, 0.92, 0.75);\n"
+    "          col += K * uRelief.y * lit * plane * sp * uEnvSpec;\n"
     "        }\n"
     "      }\n"
     "      col *= max(mix(vec3(1.0), shadeC, K * sl.r * plane), vec3(0.1));\n"
@@ -753,15 +762,15 @@ static const char *kCompFs =
     "        float hx = 0.5 + (sp.x - 0.5) * uSunSide;\n"
     "        wl *= (0.35 + 0.65 * (1.0 - 0.5 * (hx + sp.y))) * (1.0 - 0.6 * lum);\n"
     "      }\n"
-    "      col *= vec3(1.0) + wl * vec3(0.45, 0.25, -0.08);\n"
+    "      col *= vec3(1.0) + wl * uEnvLift;\n"
     "      if (uLightMode == 1) {\n"
     "        float halo = 0.0;\n"
-    "        for (int i = 0; i < 4; i++) {\n"
+    "        for (int i = 0; i < " NLIGHTS_STR "; i++) {\n"
     "          if (i >= uNumLights) break;\n"
     "          float d = length(wp - uLights[i]);\n"
     "          halo += 0.7 * exp(-d / 14.0) + 0.10 * exp(-d / 64.0);\n"
     "        }\n"
-    "        col += K * uLightP.w * halo * vec3(0.55, 0.42, 0.20);\n"
+    "        col += K * uLightP.w * halo * uEnvHalo;\n"
     "      }\n"
     "    }\n"
     "    oColor = vec4(min(col, vec3(1.0)), 1.0);\n"
@@ -993,6 +1002,10 @@ int GlrInit(void *(*getProc)(const char *), int es)
     uCLightMode = G(glGetUniformLocation)(sProgComp, "uLightMode");
     uCLightMix = G(glGetUniformLocation)(sProgComp, "uLightMix");
     uCSunSide = G(glGetUniformLocation)(sProgComp, "uSunSide");
+    uCEnvLift = G(glGetUniformLocation)(sProgComp, "uEnvLift");
+    uCEnvShade = G(glGetUniformLocation)(sProgComp, "uEnvShade");
+    uCEnvHalo = G(glGetUniformLocation)(sProgComp, "uEnvHalo");
+    uCEnvSpec = G(glGetUniformLocation)(sProgComp, "uEnvSpec");
     uCCharShP = G(glGetUniformLocation)(sProgComp, "uCharShP");
     {
         GLint loc = G(glGetUniformLocation)(sProgComp, "uCharSh");
@@ -1314,6 +1327,17 @@ int GlrHudActive(void)
  * composite is the old one. */
 static void UploadLight(const RlFrame *f)
 {
+    /* The environment's colours: the frame's, or Rainbow Route's while it
+     * carries none (all zero; render_list.h). */
+    static const float kEnvRR[4][3] = {
+        { 0.45f, 0.25f, -0.08f },   /* envLift  */
+        { 0.90f, 0.95f, 1.20f },    /* envShade */
+        { 0.55f, 0.42f, 0.20f },    /* envHalo  */
+        { 1.0f, 0.92f, 0.75f },     /* envSpec  */
+    };
+    const float *env[4];
+    int i, any = 0;
+
     if (!f->light || f->lightW <= 0 || f->lightH <= 0
         || f->lightW > sMaxTex || f->lightH > sMaxTex) {
         G(glUniform1i)(uCLight, 0);
@@ -1348,6 +1372,19 @@ static void UploadLight(const RlFrame *f)
     G(glUniform1f)(uCLightMix, f->lightMix);
     G(glUniform1i)(uCNrmView, f->lightNrmView);
     G(glUniform1f)(uCSunSide, f->lightSunSide);
+    env[0] = f->envLift;
+    env[1] = f->envShade;
+    env[2] = f->envHalo;
+    env[3] = f->envSpec;
+    for (i = 0; i < 12; i++)
+        any |= env[i / 3][i % 3] != 0.0f;
+    if (!any)
+        for (i = 0; i < 4; i++)
+            env[i] = kEnvRR[i];
+    G(glUniform3f)(uCEnvLift, env[0][0], env[0][1], env[0][2]);
+    G(glUniform3f)(uCEnvShade, env[1][0], env[1][1], env[1][2]);
+    G(glUniform3f)(uCEnvHalo, env[2][0], env[2][1], env[2][2]);
+    G(glUniform3f)(uCEnvSpec, env[3][0], env[3][1], env[3][2]);
 }
 
 /* --- relief: normal maps for the lighting (relief_glsl.h) -----------------
@@ -1749,7 +1786,7 @@ static void RunCharShadow(const RlFrame *f, int k)
 {
     int w = (f->viewW + CHARSH_CELL - 1) / CHARSH_CELL, h = (f->viewH + CHARSH_CELL - 1) / CHARSH_CELL;
     float a = f->lightAngle * 3.14159265f / 180.0f;
-    float lv[8] = { 0 };
+    float lv[RL_MAX_LIGHTS * 2] = { 0 };
     int i;
 
     G(glActiveTexture)(GL_TEXTURE0 + UNIT_CHARSH);
@@ -1781,7 +1818,7 @@ static void RunCharShadow(const RlFrame *f, int k)
         sCharShW = w;
         sCharShH = h;
     }
-    for (i = 0; i < f->numLights && i < 4; i++) {
+    for (i = 0; i < f->numLights && i < RL_MAX_LIGHTS; i++) {
         lv[i * 2 + 0] = f->lights[i][0] - (float)(f->camX + f->viewX) - f->viewSubX / 256.0f;
         lv[i * 2 + 1] = f->lights[i][1] - (float)(f->camY + f->viewY) - f->viewSubY / 256.0f;
     }
@@ -1813,7 +1850,7 @@ static void RunCharShadow(const RlFrame *f, int k)
     G(glUniform1i)(uSMode, f->lightMode);
     G(glUniform2f)(uSSunA, a, (1.0f + 16.0f * f->lightSoft) * 3.14159265f / 180.0f);
     G(glUniform1i)(uSNumL, f->numLights);
-    G(glUniform2fv)(uSLv, 4, lv);
+    G(glUniform2fv)(uSLv, RL_MAX_LIGHTS, lv);
     G(glUniform1f)(uSDisc, 4.0f + 56.0f * f->lightSoft);
     G(glUniform2i)(uSOccG, f->lightOcc ? sOccW : 0, f->lightOcc ? sOccH : 0);
     G(glUniform2f)(uSViewW, (float)(f->camX + f->viewX) + f->viewSubX / 256.0f,
