@@ -494,6 +494,19 @@
                     any = json({ t: 'signal', to: ms[i].mid, data: data }) || any;
             return any;
         };
+        /* A JSON payload for one member (`to`) or, with to === null, every
+         * other connected member, over the room's `signal` relay: reliable
+         * and in order (one socket), on any server version.  Co-op's
+         * progress and enemy events ride on this (web/coop.js). */
+        self.sendSignal = function (to, data) {
+            if (self.state !== 'open') return false;
+            if (to !== null && to !== undefined) return json({ t: 'signal', to: to, data: data });
+            var ms = (self.roster && self.roster.members) || [], any = false;
+            for (var i = 0; i < ms.length; i++)
+                if (ms[i].mid !== self.mid && ms[i].connected && ms[i].role !== 'pending')
+                    any = json({ t: 'signal', to: ms[i].mid, data: data }) || any;
+            return any;
+        };
         self.reconnectNow = function () {
             if (closed || fatal) return;
             if (retryTimer) {
@@ -537,6 +550,6 @@
         createRoom: createRoom, lookupRoom: lookupRoom, resumeRoom: resumeRoom,
         connect: connect, FrameDecoder: FrameDecoder, encodeInput: encodeInput,
         randomHex: randomHex, jitteredBackoff: jitteredBackoff,
-        T_POSE_UP: T_POSE_UP, T_POSE_DOWN: T_POSE_DOWN,
+        T_POSE_UP: T_POSE_UP, T_POSE_DOWN: T_POSE_DOWN, b64: b64, unb64: unb64,
     };
 }));

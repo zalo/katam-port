@@ -1,4 +1,6 @@
-/* Co-op stage 1: other players as puppet Kirbys.  Two parts in one file
+/* Co-op: other players as puppet Kirbys (stage 1), shared progress (stage
+ * 2), shared enemies (stage 3) and shared boss health (stage 4); see
+ * docs/COOP-HANDOFF.md.  Two parts in one file
  * (one script tag): the logic, KatamCoop (UMD, no DOM; node loads it with
  * require), then the page glue below it, which only runs in a browser.
  *
@@ -40,7 +42,11 @@
 }(typeof self !== 'undefined' ? self : this, function () {
     'use strict';
 
-    var SIM = 'coop/1';
+    /* coop/2: shared progress, enemies and bosses ride on the signal relay.
+     * The pose is unchanged, but a room should not mix pages that share
+     * progress with pages that do not; the room's version check keeps them
+     * apart. */
+    var SIM = 'coop/2';
     var FRAME_MS = 1000 / 59.7275;
     var T_POSE_UP = 0x40;
     var F_PAUSED = 1, F_KEY = 2;          /* message flags */
@@ -63,6 +69,97 @@
 
     var REQUIRED = ['_PortCoopPoseSize', '_PortCoopEnable', '_PortCoopReady', '_PortCoopSetPuppet',
                     '_PortCoopSetPose', '_PortCoopSetAbsent', '_PortCoopLocalPose', '_PortCoopPoseBuffer'];
+
+    /* Stage 2, shared progress (platform/coop_world.c).  Optional: a build
+     * without them still shows puppets. */
+    var WORLD = ['_PortCoopWorldShare', '_PortCoopWorldTake', '_PortCoopWorldApply', '_PortCoopWorldNews',
+                 '_PortCoopRecordBuffer', '_PortCoopWorldCount', '_PortCoopWorldTracking'];
+    var NEWS = { SHARD: 1, BIGCHEST: 2, SPRAY: 4, MUSIC: 8, VITALITY: 16, SWITCH: 32, CHEST: 64,
+                 MAP: 128, ENCOUNTER: 256, STORY: 512, OTHER: 1024 };
+    var REC_FULL = 1, RECORD_MAX = 1024;
+
+    /* Stage 3, shared enemies (platform/coop_enemy.c).  Optional too. */
+    var ENEMY = ['_PortCoopEnemyShare', '_PortCoopEnemyCollect', '_PortCoopEnemySetPoses', '_PortCoopEnemyTake',
+                 '_PortCoopEnemyEvent'];
+    var EN_REC = 14, EN_SEND_MS = 31, EN_DELAY = 4;
+
+    /* The room owner's enemy snapshots, played back EN_DELAY frames behind the
+     * newest with x/y interpolated per enemy (records are matched by index).
+     * Snapshot bytes: u16 room, u16 n, n x {u16 idx, i32 x, i32 y, s16 hp,
+     * u8 anim, u8 flags}. */
+    function EnemyBuffer() { this.reset(); }
+    EnemyBuffer.prototype.reset = function () { this.snaps = []; this.from = null; this.lastSeq = null; this.t = 0; this.min = null; };
+    EnemyBuffer.prototype.push = function (from, seq, bytes, nowF) {
+        if (from !== this.from) { this.reset(); this.from = from; }
+        if (this.lastSeq === null) { this.lastSeq = seq; this.t = seq; }
+        var d = ((seq - this.lastSeq + 32768) & 0xFFFF) - 32768;
+        if (d <= 0) return;
+        this.lastSeq = seq;
+        this.t += d;
+        this.snaps.push({ t: this.t, b: bytes, at: nowF });
+        if (this.snaps.length > 12) this.snaps.shift();
+        var off = nowF - this.t;
+        /* the fastest a snapshot has come through lately; creeps up slowly so
+         * a link that got slower is followed */
+        this.min = this.min === null ? off : Math.min(off, this.min + 0.02);
+    };
+    function enRecs(b) {
+        var n = b[2] | (b[3] << 8), m = {};
+        for (var i = 0; i < n && 4 + (i + 1) * EN_REC <= b.length; i++) {
+            var o = 4 + i * EN_REC;
+            m[b[o] | (b[o + 1] << 8)] = o;
+        }
+        return m;
+    }
+    /* -> bytes for PortCoopEnemySetPoses, or null (nothing fresh) */
+    EnemyBuffer.prototype.sample = function (nowF) {
+        var s = this.snaps;
+        if (!s.length || nowF - s[s.length - 1].at > 30) return null;
+        var c = nowF - this.min - EN_DELAY;
+        var k = 0;
+        while (k + 1 < s.length && s[k + 1].t <= c) k++;
+        var a = s[k], b = s[k + 1];
+        if (!b || c <= a.t) return a.b;
+        if ((a.b[0] | (a.b[1] << 8)) !== (b.b[0] | (b.b[1] << 8))) return b.b;
+        var f = (c - a.t) / (b.t - a.t), out = b.b.slice(), ra = enRecs(a.b), rb = enRecs(out);
+        for (var idx in rb) {
+            if (ra[idx] === undefined) continue;
+            var oa = ra[idx], ob = rb[idx];
+            for (var q = 2; q <= 6; q += 4) {
+                var va = i32(a.b, oa + q), vb = i32(out, ob + q);
+                if (Math.abs(vb - va) <= 48 * 256) setI32(out, ob + q, Math.round(va + (vb - va) * f));
+            }
+        }
+        return out;
+    };
+
+    function b64(bytes) {
+        var s = '';
+        for (var i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
+        return btoa(s);
+    }
+    function unb64(str) {
+        var t = atob(str), b = new Uint8Array(t.length);
+        for (var i = 0; i < t.length; i++) b[i] = t.charCodeAt(i);
+        return b;
+    }
+
+    /* One line for what a progress record brought, or null when it is only
+     * map squares and the like.  counts(kind) -> how many the local file has. */
+    function describeNews(news, full, counts) {
+        var bits = [];
+        if (news & NEWS.SHARD) bits.push('a Mirror Shard (' + counts(NEWS.SHARD) + '/8)');
+        if (news & NEWS.BIGCHEST) bits.push('an area map');
+        if (news & NEWS.VITALITY) bits.push('a Vitality heart');
+        if (news & NEWS.SPRAY) bits.push('a spray paint');
+        if (news & NEWS.MUSIC) bits.push('music for the sound player');
+        if (news & NEWS.SWITCH) bits.push('a big switch');
+        if (!(news & (NEWS.SHARD | NEWS.BIGCHEST | NEWS.VITALITY | NEWS.SPRAY | NEWS.MUSIC)) && (news & NEWS.CHEST))
+            bits.push('a treasure chest');
+        if (news & NEWS.STORY) bits.push('story progress');
+        if (!bits.length) return null;
+        return (full ? 'shared progress: ' : 'found ') + bits.join(', ');
+    }
 
     function nowMs() { return (typeof performance !== 'undefined' ? performance : Date).now(); }
 
@@ -252,6 +349,14 @@
         var stats = { sent: 0, sentPoses: 0, recv: 0, sizeMismatch: 0, mismatchFrom: null, frames: 0 };
         var applied = [null, null, null, null];  /* the bytes last given to SetPose, per slot */
         var hiddenOthers = 0;
+        /* shared enemies */
+        var enemyOk = !missing.length && ENEMY.every(function (n) { return typeof M[n] === 'function'; });
+        var enemy = { share: opts.enemies !== false, shareSet: null, buf: new EnemyBuffer(), inbox: [], lastSent: -Infinity,
+                      owner: null, stats: { snapsSent: 0, snapsRecv: 0, snapsUsed: 0, evSent: 0, evRecv: 0 } };
+        /* shared progress */
+        var worldOk = !missing.length && WORLD.every(function (n) { return typeof M[n] === 'function'; });
+        var world = { share: opts.share !== false, shareSet: null, inbox: [], fullTo: {},
+                      stats: { sent: 0, sentFull: 0, recv: 0, applied: 0, queued: 0, bad: 0, news: 0 } };
 
         if (missing.length) log('[coop] this build has no co-op engine exports (' + missing.join(', ') + ') -- puppets off');
         else if (size < 11 || size > 64) { log('[coop] pose size ' + size + ' is unusable'); missing = ['_PortCoopPoseSize']; }
@@ -291,6 +396,7 @@
             });
             for (var s = 1; s <= SLOTS; s++) if (slots[s] !== null && !here[slots[s]]) freeSlot(s);
             for (var mid in remotes) if (!here[mid]) delete remotes[mid];
+            for (var fm in world.fullTo) if (!here[fm]) delete world.fullTo[fm];
             os.sort(function (a, b) { return ((a.seat < 0 ? 1e9 : a.seat) - (b.seat < 0 ? 1e9 : b.seat)) || a.mid - b.mid; });
             var shown = 0;
             os.forEach(function (m) {
@@ -303,11 +409,60 @@
             hiddenOthers = os.length - shown;
         }
 
+        /* Our own colour: the seat's (pink, yellow, red, green, then the
+         * spray paints), so everyone sees everyone in the same colour; the
+         * engine keeps a chosen spray paint instead (PortCoopSetLocalColor). */
+        var myColor = null;
+        function seatColor() {
+            var ms = ((net.roster && net.roster.members) || []).slice();
+            var me = null;
+            for (var i = 0; i < ms.length; i++) if (ms[i].mid === net.mid) me = ms[i];
+            if (!me) return null;
+            var n = me.seat;
+            if (!(n >= 0)) {
+                ms.sort(function (a, b) { return a.mid - b.mid; });
+                n = ms.indexOf(me);
+            }
+            return n < 4 ? n : 4 + (n - 4) % 10;
+        }
+        function colorTick() {
+            if (typeof M._PortCoopSetLocalColor !== 'function') return;
+            var c = seatColor();
+            if (c === null || c === myColor) return;
+            myColor = c;
+            M._PortCoopSetLocalColor(c);
+        }
+
         net.on('roster', assign);
         net.on('welcome', function () {
             /* (re)connected: start every stream over */
             for (var mid in remotes) remotes[mid].jb.reset();
             tx.key = true;
+            world.fullTo = {};      /* deltas sent while we were away were lost */
+        });
+        net.on('signal', function (m) {
+            var d = m && m.data;
+            if (d && enemyOk && enemy.share && (typeof d.en === 'string' || typeof d.ev === 'string')) {
+                var eb;
+                try { eb = unb64(typeof d.en === 'string' ? d.en : d.ev); } catch (e) { return; }
+                if (typeof d.en === 'string') {
+                    if (eb.length < 4 || eb.length > RECORD_MAX) return;
+                    enemy.stats.snapsRecv++;
+                    enemy.inbox.push({ from: m.from, seq: d.s | 0, bytes: eb, nowF: now() / FRAME_MS });
+                } else if (eb.length % 8 === 0 && eb.length <= 8 * 64) {
+                    enemy.stats.evRecv++;
+                    enemy.inbox.push({ from: m.from, ev: eb });
+                }
+                if (enemy.inbox.length > 128) enemy.inbox.shift();
+                return;
+            }
+            if (!d || typeof d.prog !== 'string' || !worldOk || !world.share) return;
+            var b;
+            try { b = unb64(d.prog); } catch (e) { world.stats.bad++; return; }
+            if (b.length < 10 || b.length > RECORD_MAX) { world.stats.bad++; return; }
+            world.stats.recv++;
+            world.inbox.push({ from: m.from, bytes: b });
+            if (world.inbox.length > 256) world.inbox.shift();
         });
         net.on('pose', function (from, body) {
             var p = decodePoseBody(body);
@@ -390,7 +545,151 @@
             }
         }
 
+        function nameOf(mid) {
+            var ms = (net.roster && net.roster.members) || [];
+            for (var i = 0; i < ms.length; i++)
+                if (ms[i].mid === mid) return ms[i].name === 'Player' && ms[i].seat >= 0 ? 'Player ' + (ms[i].seat + 1) : ms[i].name;
+            return 'Someone';
+        }
+
+        function notice(mid, news, full) {
+            world.stats.news++;
+            var line = describeNews(news, full, function (k) { return M._PortCoopWorldCount(k); });
+            if (!line) return;
+            var who = mid === null ? 'The room' : nameOf(mid);
+            log('[coop] ' + who + ' ' + line);
+            if (self.onNotice) {
+                try { self.onNotice({ who: who, mid: mid, text: line, news: news, full: full }); } catch (e) { /* page */ }
+            }
+        }
+
+        /* Which room the local player is in (null: not in one). */
+        function myRoom() {
+            return tx.last && !poseHidden(tx.last) ? poseRoom(tx.last) : null;
+        }
+        /* The players in a room as this page sees them: itself, and every
+         * shown remote whose played-back pose is there.  The owner is the
+         * lowest member id; two pages that briefly disagree both run their
+         * own enemies, which is what happens without co-op at all. */
+        function roomMembers(room) {
+            var list = [];
+            if (room === null) return list;
+            if (myRoom() === room) list.push(net.mid);
+            for (var mid in remotes) {
+                var r = remotes[mid];
+                if (r.slot && r.out && r.out.state === 'pose' && !r.out.away && !poseHidden(r.out.bytes)
+                    && poseRoom(r.out.bytes) === room) list.push(+mid);
+            }
+            return list;
+        }
+
+        function enemyTick(t) {
+            if (!enemyOk) return;
+            if (enemy.shareSet !== enemy.share) {
+                M._PortCoopEnemyShare(enemy.share ? 1 : 0);
+                enemy.shareSet = enemy.share;
+            }
+            if (!enemy.share) { enemy.inbox = []; return; }
+            var buf = M._PortCoopRecordBuffer(), nowF = t / FRAME_MS;
+            var room = myRoom(), members = roomMembers(room);
+            var owner = members.length ? Math.min.apply(null, members) : null;
+            if (owner !== enemy.owner) { enemy.owner = owner; enemy.buf.reset(); }
+            var slotOf = function (mid) { return remotes[mid] ? remotes[mid].slot : 0; };
+            /* incoming: events always, snapshots only from this room's owner */
+            while (enemy.inbox.length) {
+                var e = enemy.inbox.shift();
+                if (e.ev) {
+                    for (var i = 0; i + 8 <= e.ev.length; i += 8) {
+                        var dmg = e.ev[i + 6] | (e.ev[i + 7] << 8);
+                        if (dmg & 0x8000) dmg -= 0x10000;
+                        M._PortCoopEnemyEvent(e.ev[i], e.ev[i + 2] | (e.ev[i + 3] << 8), e.ev[i + 4] | (e.ev[i + 5] << 8),
+                                              dmg, slotOf(e.from));
+                    }
+                } else if (owner !== null && e.from === owner && owner !== net.mid
+                           && (e.bytes[0] | (e.bytes[1] << 8)) === room) {
+                    enemy.buf.push(e.from, e.seq, e.bytes, e.nowF);
+                }
+            }
+            if (owner !== null && owner !== net.mid) {
+                var snap = enemy.buf.sample(nowF);
+                if (snap) {
+                    heap().set(snap, buf);
+                    M._PortCoopEnemySetPoses(buf, snap.length);
+                    enemy.stats.snapsUsed++;
+                }
+            }
+            /* outgoing events */
+            var os = net.state === 'open' ? others() : [];
+            var n = M._PortCoopEnemyTake(buf, 64);
+            if (n > 0 && os.length && net.sendSignal(null, { ev: b64(heap().slice(buf, buf + n * 8)) })) enemy.stats.evSent++;
+            /* the owner streams the room's enemies to the others in it */
+            if (owner !== net.mid || members.length < 2 || t - enemy.lastSent < EN_SEND_MS) return;
+            var len = M._PortCoopEnemyCollect(buf, RECORD_MAX);
+            if (len < 4) return;
+            enemy.lastSent = t;
+            var data = { en: b64(heap().slice(buf, buf + len)), s: Math.round(t / FRAME_MS) & 0xFFFF };
+            members.forEach(function (mid) { if (mid !== net.mid) net.sendSignal(mid, data); });
+            enemy.stats.snapsSent++;
+        }
+
+        /* Every frame: merge what came in, send what is new here.  Records are
+         * opaque; the engine says what they meant. */
+        function worldTick() {
+            if (!worldOk) return;
+            if (world.shareSet !== world.share) {
+                M._PortCoopWorldShare(world.share ? 1 : 0);
+                world.shareSet = world.share;
+            }
+            if (!world.share) { world.inbox = []; return; }
+            var buf = M._PortCoopRecordBuffer();
+            while (world.inbox.length) {
+                var r = world.inbox.shift();
+                heap().set(r.bytes, buf);
+                var res = M._PortCoopWorldApply(buf, r.bytes.length);
+                if (res === -1) world.stats.queued++;
+                else if (res < 0) world.stats.bad++;
+                else {
+                    world.stats.applied++;
+                    if (res) notice(r.from, res, r.bytes[2] === REC_FULL);
+                }
+            }
+            var late = M._PortCoopWorldNews();
+            if (late) notice(null, late, true);
+
+            var os = net.state === 'open' ? others() : [];
+            var len = M._PortCoopWorldTake(buf, 0);       /* always: keeps the shadow current */
+            if (len > 0 && os.length) {
+                var rec = heap().slice(buf, buf + len);
+                if (net.sendSignal(null, { prog: b64(rec) })) {
+                    world.stats.sent++;
+                    if (rec[2] === REC_FULL) {
+                        world.stats.sentFull++;
+                        os.forEach(function (m) { world.fullTo[m.mid] = true; });
+                    }
+                }
+            }
+            if (!os.length || !M._PortCoopWorldTracking()) return;
+            var need = os.filter(function (m) { return !world.fullTo[m.mid]; });
+            if (!need.length) return;
+            var l2 = M._PortCoopWorldTake(buf, 1);
+            if (l2 <= 0) return;
+            var data = { prog: b64(heap().slice(buf, buf + l2)) };
+            need.forEach(function (m) {
+                if (net.sendSignal(m.mid, data)) { world.fullTo[m.mid] = true; world.stats.sent++; world.stats.sentFull++; }
+            });
+        }
+
         var self = {
+            onNotice: null,
+            enemyStats: enemy.stats,
+            enemyOk: enemyOk,
+            setEnemies: function (on) { enemy.share = !!on; },
+            enemies: function () { return enemyOk && enemy.share; },
+            enemyOwner: function () { return enemy.owner; },
+            worldStats: world.stats,
+            worldOk: worldOk,
+            setShare: function (on) { world.share = !!on; },
+            sharing: function () { return worldOk && world.share; },
             size: size,
             missing: missing,
             stats: stats,
@@ -400,8 +699,11 @@
                 if (!enabled) { M._PortCoopEnable(1); enabled = true; }
                 var t = now();
                 stats.frames++;
+                colorTick();
                 send(t);
                 apply(t);
+                enemyTick(t);
+                worldTick();
             },
             /* the tab is hidden (coop.js): tell the others once, then send
              * nothing; on return start every remote stream over (latest only) */
@@ -419,6 +721,12 @@
                 if (missing.length) return;
                 for (var s = 1; s <= SLOTS; s++) if (slots[s] !== null) freeSlot(s);
                 if (enabled) M._PortCoopEnable(0);
+                if (worldOk && world.shareSet) M._PortCoopWorldShare(0);
+                if (enemyOk && enemy.shareSet) M._PortCoopEnemyShare(0);
+                enemy.shareSet = null;
+                if (typeof M._PortCoopSetLocalColor === 'function') M._PortCoopSetLocalColor(-1);
+                myColor = null;
+                world.shareSet = null;
                 enabled = false;
             },
             slotOf: function (mid) { return remotes[mid] ? remotes[mid].slot : 0; },
@@ -495,6 +803,7 @@
         create: create, JitterBuffer: JitterBuffer, encodePoseUp: encodePoseUp,
         decodePoseBody: decodePoseBody, poseX: poseX, poseY: poseY, poseRoom: poseRoom,
         poseHidden: poseHidden, lerpPose: lerpPose,
+        WORLD: WORLD, NEWS: NEWS, ENEMY: ENEMY, EnemyBuffer: EnemyBuffer, describeNews: describeNews, b64: b64, unb64: unb64,
     };
 }));
 
@@ -564,6 +873,13 @@
         ' border:1px solid var(--edge,#2b3038);border-radius:7px;padding:4px 6px}',
         '#coopchip button.cc-b{font:inherit;color:inherit;background:var(--panel-2,#232730);border:1px solid var(--edge,#2b3038);',
         ' border-radius:7px;padding:4px 9px;cursor:pointer}',
+        '#coopchip label.cc-opt{display:flex;gap:6px;align-items:center;justify-content:flex-start;margin-top:6px;cursor:pointer}',
+        '#coopchip label.cc-opt input{flex:0 0 auto;width:auto;margin:0}',
+        '#coopnotes{position:fixed;z-index:55;left:calc(10px + env(safe-area-inset-left));top:calc(48px + env(safe-area-inset-top));',
+        ' display:flex;flex-direction:column;gap:4px;pointer-events:none;max-width:min(340px,calc(100vw - 20px))}',
+        '#coopnotes div{background:rgba(20,22,26,.9);border:1px solid var(--edge,#2b3038);border-radius:10px;padding:4px 10px;',
+        ' font:12px/1.4 var(--mono,monospace);color:var(--text,#d5d9e0);transition:opacity .5s}',
+        '#coopnotes div.out{opacity:0}',
     ].join('\n');
     var chip = document.createElement('div');
     chip.id = 'coopchip';
@@ -571,19 +887,66 @@
     chip.innerHTML = '<button type="button" class="cc-head"><span class="cc-dot"></span><span class="cc-t"></span></button>' +
         '<div class="cc-body"></div>';
     var head = chip.firstChild, body = chip.lastChild;
-    head.onclick = function () { S.open = !S.open; render(); };
+    head.onclick = function () { S.open = !S.open; render(); placeNotes(); };
     body.addEventListener('click', function (e) {
         var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
         if (a === 'copy') copyLink();
         else if (a === 'new') newRoom();
         else if (a === 'rejoin') rejoin();
     });
+    body.addEventListener('change', function (e) {
+        var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
+        if (a === 'share') {
+            try { localStorage.katamCoopShare = e.target.checked ? '1' : '0'; } catch (err) { /* private mode */ }
+            if (S.coop) S.coop.setShare(e.target.checked);
+        } else if (a === 'enemies') {
+            try { localStorage.katamCoopEnemies = e.target.checked ? '1' : '0'; } catch (err) { /* private mode */ }
+            if (S.coop) S.coop.setEnemies(e.target.checked);
+        } else if (a === 'name') {
+            var n = String(e.target.value || '').replace(/\s+/g, ' ').trim().slice(0, 24);
+            try { localStorage.katamNetName = n; } catch (err) { /* private mode */ }
+            if (S.net && n) S.net.rename(n);
+        } else return;
+        lastBody = null;
+        render();
+    });
+    /* typing in the name field must not drive Kirby */
+    body.addEventListener('keydown', function (e) {
+        if (e.target && e.target.getAttribute && e.target.getAttribute('data-a') === 'name') {
+            e.stopPropagation();
+            if (e.key === 'Enter') e.target.blur();
+        }
+    }, true);
+    var notes = document.createElement('div');
+    notes.id = 'coopnotes';
+    notes.setAttribute('aria-live', 'polite');
     function mount() {
         var st = document.createElement('style');
         st.textContent = css;
         document.head.appendChild(st);
         document.body.appendChild(chip);
+        document.body.appendChild(notes);
         render();
+    }
+    /* a line under the chip for a few seconds: what other players found */
+    function placeNotes() {
+        var r = chip.getBoundingClientRect();
+        notes.style.top = Math.round(r.bottom + 6) + 'px';
+    }
+    function note(text) {
+        placeNotes();
+        var d = document.createElement('div');
+        d.textContent = text;
+        notes.appendChild(d);
+        while (notes.childNodes.length > 4) notes.removeChild(notes.firstChild);
+        setTimeout(function () { d.className = 'out'; }, 5000);
+        setTimeout(function () { if (d.parentNode) d.parentNode.removeChild(d); }, 5600);
+    }
+    function shareWanted() {
+        try { return localStorage.katamCoopShare !== '0'; } catch (e) { return true; }
+    }
+    function enemiesWanted() {
+        try { return localStorage.katamCoopEnemies !== '0'; } catch (e) { return true; }
     }
 
     function esc(s) {
@@ -655,6 +1018,15 @@
                 h += '<div class="cc-dim">Up to 3 other players are shown; ' + st.hidden +
                     (st.hidden === 1 ? ' more is' : ' more are') + ' in the room but not drawn.</div>';
         }
+        if (st)
+            h += '<div class="cc-row"><input data-a="name" maxlength="24" placeholder="Your name" aria-label="Your name" value="' +
+                esc(storedName()) + '"></div>';
+        if (st && S.coop && S.coop.worldOk)
+            h += '<label class="cc-opt" title="Chests, shards, spray paints, big switches and the map are shared with everyone here">' +
+                '<input type="checkbox" data-a="share"' + (S.coop.sharing() ? ' checked' : '') + '>Share progress</label>';
+        if (st && S.coop && S.coop.enemyOk)
+            h += '<label class="cc-opt" title="Enemies in your room move and die together; minibosses and bosses share their health">' +
+                '<input type="checkbox" data-a="enemies"' + (S.coop.enemies() ? ' checked' : '') + '>Share enemies and bosses</label>';
         if (S.code)
             h += '<div class="cc-row"><input readonly value="' + esc(link(S.code)) + '" aria-label="Invite link">' +
                 '<button type="button" class="cc-b" data-a="copy">' + (Date.now() - S.copied < 2000 ? 'Copied' : 'Copy link') + '</button></div>';
@@ -663,7 +1035,11 @@
                 (net && net.lastError && net.lastError.code === 'replaced'
                     ? '<button type="button" class="cc-b" data-a="rejoin">Rejoin here</button>' : '') +
                 '<button type="button" class="cc-b" data-a="new">Start a new room</button></div>';
+        /* not while the name is being typed: that would drop the focus */
+        var ae = document.activeElement;
+        if (ae && body.contains(ae) && ae.getAttribute('data-a') === 'name') return;
         if (h !== lastBody) { body.innerHTML = h; lastBody = h; }
+        if (notes.childNodes.length) placeNotes();
     }
     var lastBody = null;
 
@@ -721,7 +1097,8 @@
                 },
             });
             S.net = net;
-            S.coop = Coop.create({ Module: M, net: net, log: log });
+            S.coop = Coop.create({ Module: M, net: net, log: log, share: shareWanted(), enemies: enemiesWanted() });
+            S.coop.onNotice = function (n) { note(n.who + ' ' + n.text); };
             window.katamCoop = { net: net, coop: S.coop };
             ['state', 'roster', 'welcome'].forEach(function (ev) { net.on(ev, render); });
             net.on('error', function (e) {
