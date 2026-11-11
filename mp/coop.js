@@ -47,8 +47,10 @@
      * progress with pages that do not; the room's version check keeps them
      * apart.  coop/3: CPU Kirbys run by one game for everyone, and spawned
      * objects (pose extras) -- a coop/2 page would run helpers of its own
-     * that the others cannot see. */
-    var SIM = 'coop/3';
+     * that the others cannot see.  coop/4: the extras carry shared enemies'
+     * shots as hazards and the sounds of the other games, and enemies go
+     * after any player -- a coop/3 page would drop the longer frames. */
+    var SIM = 'coop/4';
     var FRAME_MS = 1000 / 59.7275;
     var T_POSE_UP = 0x40;
     var F_PAUSED = 1, F_KEY = 2;          /* message flags */
@@ -86,7 +88,9 @@
      *   u8 1, u8 n, then per pose sent: u16 seq, u8 nCpu, nCpu x {u8 slot,
      *   pose}, u16 fxLen, fxLen bytes (PortCoopFxTake's frame). */
     var FX = ['_PortCoopFxShare', '_PortCoopFxBuffer', '_PortCoopFxTake', '_PortCoopFxSet', '_PortCoopSlotPose'];
-    var FX_REC = 18, FX_BYTES = 4 + 32 * 18, FX_SOURCES = 8;
+    var FX_REC = 18, FX_SOURCES = 8;
+    /* sprites, hazards, then a count and the sounds (port/coop.h) */
+    var FX_BYTES = 4 + 32 * 18 + 10 * 24 + 1 + 16 * 8;
     var F2_INLEVEL = 2, F2_TUTORIAL = 4;  /* pose byte 27 */
     var AUTH_GRACE = 5000;                /* ms; see authority() */
 
@@ -741,6 +745,8 @@
                 var mid = slots[s];
                 if (mid === null) continue;
                 if (!puppetOn[s]) { M._PortCoopSetPuppet(s, 1); puppetOn[s] = true; }
+                /* players before CPU Kirbys, for the enemies (coop.c) */
+                if (typeof M._PortCoopSetPuppetCpu === 'function') M._PortCoopSetPuppetCpu(s, typeof mid === 'number' ? 0 : 1);
                 var r = typeof mid === 'number' ? remotes[mid] : cpus[mid];
                 var out = open && r ? r.jb.sample(t) : { state: 'absent', away: true };
                 if (r) r.out = out;
@@ -1040,7 +1046,7 @@
             },
             fxStats: function () {
                 var e = [];
-                if (fxOk) for (var i = 0; i < 11; i++) e.push(M._PortCoopFxStat(i));
+                if (fxOk) for (var i = 0; i < 20; i++) e.push(M._PortCoopFxStat(i));
                 return { page: fx.stats, engine: e, lastOut: fx.lastOut || null };
             },
             /* for the status chip */
