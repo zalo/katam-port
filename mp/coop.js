@@ -545,6 +545,47 @@
             }
         }
 
+        /* A player's Kirby colour, '#rrggbb', from a pose: their own colour
+         * (bytes 32..35, platform/kirby_color.c) or one of the game's
+         * fourteen (byte 24).  null when unknown. */
+        function colorOf(b) {
+            if (!b || b.length < 36) return null;
+            var c = b[32] | (b[33] << 8), v;
+            if (c & 0x8000) {
+                var r = c & 31, g = (c >> 5) & 31, bl = (c >> 10) & 31;
+                v = (((r << 3) | (r >> 2)) << 16) | (((g << 3) | (g >> 2)) << 8) | ((bl << 3) | (bl >> 2));
+            } else if (b[24] < 14 && typeof M._PortKirbyColorSwatch === 'function') {
+                v = M._PortKirbyColorSwatch(b[24], 0);
+                if (v < 0) return null;
+            } else return null;
+            return '#' + ('00000' + v.toString(16)).slice(-6);
+        }
+
+        /* Where to put the other players' names: platform/ui/coop_tags.c.
+         * Ids are draw ids -- the puppet slots today; players drawn outside
+         * gKirbys (more than four) will add ids of their own. */
+        var TAG_MAX = 16, tagBuf = 0;
+        function midOfDrawId(id) {
+            return id >= 1 && id <= SLOTS ? slots[id] : null;
+        }
+        function bytesOfDrawId(id) {
+            return id >= 1 && id <= SLOTS ? applied[id] : null;
+        }
+        function tags() {
+            if (missing.length || typeof M._PortCoopTags !== 'function') return null;
+            if (!tagBuf) tagBuf = M._malloc(4 * (4 + 4 * TAG_MAX));
+            var n = M._PortCoopTags(tagBuf, TAG_MAX), list = [];
+            if (n <= 0) return { rect: null, list: list };
+            var f = new Float32Array(heap().buffer, tagBuf, 4 + 4 * n);
+            for (var i = 0; i < n; i++) {
+                var id = f[4 + i * 4], mid = midOfDrawId(id);
+                if (mid === null || mid === undefined) continue;
+                list.push({ mid: mid, name: nameOf(mid), x: f[5 + i * 4], y: f[6 + i * 4],
+                            off: f[7 + i * 4] === 2, color: colorOf(bytesOfDrawId(id)) });
+            }
+            return { rect: [f[0], f[1], f[2], f[3]], list: list };
+        }
+
         function nameOf(mid) {
             var ms = (net.roster && net.roster.members) || [];
             for (var i = 0; i < ms.length; i++)
@@ -730,6 +771,12 @@
                 enabled = false;
             },
             slotOf: function (mid) { return remotes[mid] ? remotes[mid].slot : 0; },
+            /* the name tags (page): {rect: [x0, y0, x1, y1] | null, list: [{mid, name,
+             * x, y, off, color}]}, positions as fractions of the canvas */
+            tags: tags,
+            /* '#rrggbb' of a player's Kirby (null: not known yet), and our own */
+            colorOf: function (mid) { var r = remotes[mid]; return r && r.slot ? colorOf(applied[r.slot]) : null; },
+            myColor: function () { return colorOf(tx.last); },
             applied: function (slot) { return applied[slot]; },
             /* for the status chip */
             status: function () {
@@ -880,6 +927,14 @@
         '#coopnotes div{background:rgba(20,22,26,.9);border:1px solid var(--edge,#2b3038);border-radius:10px;padding:4px 10px;',
         ' font:12px/1.4 var(--mono,monospace);color:var(--text,#d5d9e0);transition:opacity .5s}',
         '#coopnotes div.out{opacity:0}',
+        '#coopchip .cc-sw{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px;',
+        ' vertical-align:-1px;box-shadow:0 0 0 1px rgba(0,0,0,.6)}',
+        '#cooptags{position:fixed;left:0;top:0;width:0;height:0;z-index:54;pointer-events:none}',
+        '#cooptags .ct{position:absolute;left:0;top:0;white-space:nowrap;padding:1px 7px 1px 6px;',
+        ' border-radius:9px;background:rgba(16,18,22,.72);color:#eef0f3;font:600 12px/1.3 var(--mono,monospace);',
+        ' border-bottom:2px solid #aaa;text-shadow:0 1px 1px #000;will-change:transform}',
+        '#cooptags .ct.off{opacity:.85;font-weight:400}',
+        '#cooptags .ct i{font-style:normal;margin-right:4px;opacity:.9}',
     ].join('\n');
     var chip = document.createElement('div');
     chip.id = 'coopchip';
@@ -893,12 +948,16 @@
         if (a === 'copy') copyLink();
         else if (a === 'new') newRoom();
         else if (a === 'rejoin') rejoin();
+        else if (a === 'color') openColor();
     });
     body.addEventListener('change', function (e) {
         var a = e.target && e.target.getAttribute && e.target.getAttribute('data-a');
         if (a === 'share') {
             try { localStorage.katamCoopShare = e.target.checked ? '1' : '0'; } catch (err) { /* private mode */ }
             if (S.coop) S.coop.setShare(e.target.checked);
+        } else if (a === 'names') {
+            try { localStorage.katamCoopNames = e.target.checked ? '1' : '0'; } catch (err) { /* private mode */ }
+            drawTags();
         } else if (a === 'enemies') {
             try { localStorage.katamCoopEnemies = e.target.checked ? '1' : '0'; } catch (err) { /* private mode */ }
             if (S.coop) S.coop.setEnemies(e.target.checked);
@@ -920,13 +979,100 @@
     var notes = document.createElement('div');
     notes.id = 'coopnotes';
     notes.setAttribute('aria-live', 'polite');
+    var tagLayer = document.createElement('div');
+    tagLayer.id = 'cooptags';
+    tagLayer.setAttribute('aria-hidden', 'true');
     function mount() {
         var st = document.createElement('style');
         st.textContent = css;
         document.head.appendChild(st);
+        document.body.appendChild(tagLayer);
         document.body.appendChild(chip);
         document.body.appendChild(notes);
         render();
+        requestAnimationFrame(tagFrame);
+    }
+
+    /* --- name tags over the other players (platform/ui/coop_tags.c) ---------- */
+    function namesWanted() {
+        try { return localStorage.katamCoopNames !== '0'; } catch (e) { return true; }
+    }
+    function gameCanvas() {
+        var c = M.portGlCanvas || document.getElementById('screen');
+        return c && c.offsetParent !== null ? c : (M.portGlCanvas || document.getElementById('screen'));
+    }
+    var tagEls = {};                      /* mid -> element */
+    function tagFrame() {
+        drawTags();
+        requestAnimationFrame(tagFrame);
+    }
+    function drawTags() {
+        var t = S.coop && namesWanted() && document.visibilityState !== 'hidden' ? S.coop.tags() : null;
+        var seen = {}, cv = t && t.rect ? gameCanvas() : null, placed = [];
+        if (cv && t.list.length) {
+            var r = cv.getBoundingClientRect();
+            /* the picture's own rectangle inside the canvas, in page pixels */
+            var px0 = r.left + t.rect[0] * r.width, py0 = r.top + t.rect[1] * r.height;
+            var px1 = r.left + t.rect[2] * r.width, py1 = r.top + t.rect[3] * r.height;
+            var fs = Math.max(11, Math.min(15, Math.round((py1 - py0) / 34)));
+            t.list.forEach(function (g) {
+                var el = tagEls[g.mid];
+                if (!el) {
+                    el = tagEls[g.mid] = document.createElement('div');
+                    el.className = 'ct';
+                    el.appendChild(document.createElement('i'));
+                    el.appendChild(document.createElement('span'));
+                    tagLayer.appendChild(el);
+                }
+                seen[g.mid] = true;
+                if (el.lastChild.textContent !== g.name) el.lastChild.textContent = g.name;
+                el.style.fontSize = fs + 'px';
+                el.style.borderBottomColor = g.color || '#aaa';
+                var w = el.offsetWidth || 60, h = el.offsetHeight || 18, m = 4;
+                /* the tag's bottom centre sits just above the Kirby's head */
+                var x = r.left + g.x * r.width, y = r.top + g.y * r.height - 3, arrow = '';
+                if (g.off || x < px0 || x > px1 || y < py0 + h || y > py1) {
+                    /* in the room but off the picture: pinned to its edge,
+                     * pointing the way */
+                    if (x < px0 + w / 2 + m) arrow = '\u25C0';
+                    else if (x > px1 - w / 2 - m) arrow = '\u25B6';
+                    else if (y < py0 + h + m) arrow = '\u25B2';
+                    else if (y > py1 - m) arrow = '\u25BC';
+                    x = Math.max(px0 + w / 2 + m, Math.min(px1 - w / 2 - m, x));
+                    y = Math.max(py0 + h + m, Math.min(py1 - m, y));
+                }
+                if (el.firstChild.textContent !== arrow) el.firstChild.textContent = arrow;
+                el.firstChild.style.display = arrow ? '' : 'none';
+                el.classList.toggle('off', !!arrow);
+                placed.push({ el: el, x: x, y: y, w: w, h: h });
+            });
+            /* tags on top of each other: lift the later ones clear */
+            for (var i = 1; i < placed.length; i++) {
+                for (var j = 0, guard = 0; j < i && guard < 64; j++) {
+                    var a = placed[i], b = placed[j];
+                    if (Math.abs(a.x - b.x) < (a.w + b.w) / 2 && Math.abs(a.y - b.y) < (a.h + b.h) / 2) {
+                        a.y = Math.min(a.y, b.y) - (a.h + b.h) / 2 - 2;
+                        j = -1;                 /* check again from the start */
+                        guard++;
+                    }
+                }
+            }
+            placed.forEach(function (p) {
+                p.el.style.transform = 'translate(' + Math.round(p.x) + 'px,' + Math.round(p.y) + 'px) translate(-50%,-100%)';
+                p.el.style.display = '';
+            });
+        }
+        for (var mid in tagEls) {
+            if (seen[mid]) continue;
+            if (tagEls[mid].parentNode) tagEls[mid].parentNode.removeChild(tagEls[mid]);
+            delete tagEls[mid];
+        }
+    }
+
+    /* the settings menu's Kirby page (platform/ui/ui_menu.cpp) */
+    function openColor() {
+        var ok = typeof M._PortUiOpenPageJs === 'function' && M._PortUiOpenPageJs(1);
+        if (!ok) note('The colour picker is in the settings menu, which needs WebGL2 -- this browser has it off.');
     }
     /* a line under the chip for a few seconds: what other players found */
     function placeNotes() {
@@ -1007,9 +1153,10 @@
         if (st && st.sizeMismatch)
             h += '<div class="cc-err">Someone here runs a different build; their Kirby cannot be shown. Reload both pages.</div>';
         if (st) {
-            h += '<ul><li>You' + (st.paused ? ' <span class="cc-dim">(away)</span>' : '') + '</li>';
+            var dot = function (c) { return c ? '<span class="cc-sw" style="background:' + c + '"></span>' : ''; };
+            h += '<ul><li>' + dot(S.coop.myColor()) + 'You' + (st.paused ? ' <span class="cc-dim">(away)</span>' : '') + '</li>';
             st.players.forEach(function (p) {
-                h += '<li>' + esc(p.name === 'Player' && p.seat >= 0 ? 'Player ' + (p.seat + 1) : p.name) +
+                h += '<li>' + dot(S.coop.colorOf(p.mid)) + esc(p.name === 'Player' && p.seat >= 0 ? 'Player ' + (p.seat + 1) : p.name) +
                     (p.slot ? (p.away ? ' <span class="cc-dim">(away)</span>' : '') : ' <span class="cc-dim">(not shown)</span>') +
                     (p.rtt != null ? ' <span class="cc-dim">' + p.rtt + ' ms</span>' : '') + '</li>';
             });
@@ -1020,7 +1167,13 @@
         }
         if (st)
             h += '<div class="cc-row"><input data-a="name" maxlength="24" placeholder="Your name" aria-label="Your name" value="' +
-                esc(storedName()) + '"></div>';
+                esc(storedName()) + '">' +
+                (typeof M._PortUiOpenPageJs === 'function'
+                    ? '<button type="button" class="cc-b" data-a="color" title="Pick your Kirby\'s colour (settings menu)">Colour</button>' : '') +
+                '</div>';
+        if (st && typeof M._PortCoopTags === 'function')
+            h += '<label class="cc-opt" title="Each player\'s name above their Kirby">' +
+                '<input type="checkbox" data-a="names"' + (namesWanted() ? ' checked' : '') + '>Show names</label>';
         if (st && S.coop && S.coop.worldOk)
             h += '<label class="cc-opt" title="Chests, shards, spray paints, big switches and the map are shared with everyone here">' +
                 '<input type="checkbox" data-a="share"' + (S.coop.sharing() ? ' checked' : '') + '>Share progress</label>';
