@@ -414,6 +414,7 @@
                         var pb;
                         try { pb = unb64(m.data.pose); } catch (err) { return; }
                         emit('pose', m.from, pb);
+                        if (typeof m.data.x === 'string') emit('signal', { t: 'signal', from: m.from, data: { x: m.data.x } });
                         return;
                     }
                     emit('signal', m);
@@ -483,12 +484,21 @@
         };
         self.hasFeature = function (f) { return self.features.indexOf(f) >= 0; };
         /* up: a POSE_UP (netplay/wire.mjs).  Binary only to a room that
-         * relays it; otherwise one `signal` per other connected member. */
-        self.sendPose = function (up) {
+         * relays it; otherwise one `signal` per other connected member.
+         * x: optional extras (a string, web/coop.js) that belong to these
+         * poses -- inside the same signal on the fallback, or one signal to
+         * everyone right after the binary pose (same socket, so it arrives
+         * after it). */
+        self.sendPose = function (up, x) {
             if (self.state !== 'open' || up[0] !== T_POSE_UP) return false;
-            if (self.hasFeature('pose')) return tx(up);
+            if (self.hasFeature('pose')) {
+                var ok = tx(up);
+                if (ok && typeof x === 'string') self.sendSignal(null, { x: x });
+                return ok;
+            }
             var ms = (self.roster && self.roster.members) || [];
             var data = { pose: b64(up.subarray(1)) }, any = false;
+            if (typeof x === 'string') data.x = x;
             for (var i = 0; i < ms.length; i++)
                 if (ms[i].mid !== self.mid && ms[i].connected && ms[i].role !== 'pending')
                     any = json({ t: 'signal', to: ms[i].mid, data: data }) || any;

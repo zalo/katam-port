@@ -45,8 +45,10 @@
     /* coop/2: shared progress, enemies and bosses ride on the signal relay.
      * The pose is unchanged, but a room should not mix pages that share
      * progress with pages that do not; the room's version check keeps them
-     * apart. */
-    var SIM = 'coop/2';
+     * apart.  coop/3: CPU Kirbys run by one game for everyone, and spawned
+     * objects (pose extras) -- a coop/2 page would run helpers of its own
+     * that the others cannot see. */
+    var SIM = 'coop/3';
     var FRAME_MS = 1000 / 59.7275;
     var T_POSE_UP = 0x40;
     var F_PAUSED = 1, F_KEY = 2;          /* message flags */
@@ -77,6 +79,16 @@
     var NEWS = { SHARD: 1, BIGCHEST: 2, SPRAY: 4, MUSIC: 8, VITALITY: 16, SWITCH: 32, CHEST: 64,
                  MAP: 128, ENCOUNTER: 256, STORY: 512, OTHER: 1024 };
     var REC_FULL = 1, RECORD_MAX = 1024;
+
+    /* Spawned objects and CPU Kirbys (platform/coop_fx.c, coop.c).  Optional:
+     * an older build simply shows neither.  Both ride with the pose: an
+     * "extras" blob per pose message (net.sendPose's second argument),
+     *   u8 1, u8 n, then per pose sent: u16 seq, u8 nCpu, nCpu x {u8 slot,
+     *   pose}, u16 fxLen, fxLen bytes (PortCoopFxTake's frame). */
+    var FX = ['_PortCoopFxShare', '_PortCoopFxBuffer', '_PortCoopFxTake', '_PortCoopFxSet', '_PortCoopSlotPose'];
+    var FX_REC = 18, FX_BYTES = 4 + 32 * 18, FX_SOURCES = 8;
+    var F2_INLEVEL = 2, F2_TUTORIAL = 4;  /* pose byte 27 */
+    var AUTH_GRACE = 5000;                /* ms; see authority() */
 
     /* Stage 3, shared enemies (platform/coop_enemy.c).  Optional too. */
     var ENEMY = ['_PortCoopEnemyShare', '_PortCoopEnemyCollect', '_PortCoopEnemySetPoses', '_PortCoopEnemyTake',
@@ -267,6 +279,17 @@
         return this.lastT + d;
     };
 
+    /* seq on this buffer's timeline, without moving it (extras arrive with or
+     * just after the pose they belong to) */
+    JitterBuffer.prototype.tOf = function (seq) {
+        if (this.lastSeq === null) return seq;
+        return this.lastT + (((seq - this.lastSeq + 32768) & 0xFFFF) - 32768);
+    };
+    JitterBuffer.prototype.newest = function () {
+        var s = this.samples;
+        return s.length ? s[s.length - 1].b : null;
+    };
+
     JitterBuffer.prototype.push = function (seq, bytes, now, flags) {
         if ((flags & F_KEY) || now - this.lastArrival > STALL_MS)
             this.reset();
@@ -341,14 +364,22 @@
         var now = opts.now || nowMs;
         var missing = REQUIRED.filter(function (n) { return typeof M[n] !== 'function'; });
         var size = missing.length ? 0 : M._PortCoopPoseSize();
-        var remotes = {};                 /* mid -> {mid, name, seat, jb, slot} */
-        var slots = [null, null, null, null];   /* slot -> mid */
+        var remotes = {};                 /* mid -> {mid, name, seat, jb, slot, fx, cpuSeen, src} */
+        /* slot -> who it shows: a member id (a player), 'c<mid>:<slot>' (a CPU
+         * Kirby that member's game runs for everyone), 'x<slot>' (nobody: a
+         * page that does not run the CPU Kirbys shows none of its own) */
+        var slots = [null, null, null, null];
+        var cpus = {};                    /* 'c<mid>:<slot>' -> {key, mid, id, jb, slot, out} */
         var puppetOn = [false, false, false, false];
         var enabled = false, wasReady = false, paused = false;
         var tx = { pending: [], lastAt: -Infinity, last: null, unchanged: 0, key: true, pausedSent: false };
         var stats = { sent: 0, sentPoses: 0, recv: 0, sizeMismatch: 0, mismatchFrom: null, frames: 0 };
         var applied = [null, null, null, null];  /* the bytes last given to SetPose, per slot */
         var hiddenOthers = 0;
+        /* spawned objects and CPU Kirbys */
+        var fxOk = !missing.length && FX.every(function (n) { return typeof M[n] === 'function'; });
+        var cpu = { on: opts.cpus !== false, auth: null };
+        var fx = { on: opts.fx !== false, shareSet: null, srcUsed: [], stats: { framesSent: 0, framesRecv: 0, framesSet: 0, cpuSent: 0, cpuRecv: 0, unmapped: {} } };
         /* shared enemies */
         var enemyOk = !missing.length && ENEMY.every(function (n) { return typeof M[n] === 'function'; });
         var enemy = { share: opts.enemies !== false, shareSet: null, buf: new EnemyBuffer(), inbox: [], lastSent: -Infinity,
@@ -366,8 +397,20 @@
 
         function remote(mid) {
             var r = remotes[mid];
-            if (!r) r = remotes[mid] = { mid: mid, name: 'Player', seat: -1, jb: new JitterBuffer(), slot: 0, out: null };
+            if (!r) r = remotes[mid] = { mid: mid, name: 'Player', seat: -1, jb: new JitterBuffer(), slot: 0, out: null,
+                                         fx: [], fxResets: -1, cpuSeen: {}, src: -1 };
             return r;
+        }
+        function cpuKey(mid, id) { return 'c' + mid + ':' + id; }
+        function cpuOf(mid, id) {
+            var k = cpuKey(mid, id), c = cpus[k];
+            if (!c) c = cpus[k] = { key: k, mid: +mid, id: id, jb: new JitterBuffer(), slot: 0, out: null };
+            return c;
+        }
+        function isBlank(k) { return typeof k === 'string' && k.charAt(0) === 'x'; }
+        function slotOfKey(k) {
+            if (typeof k === 'number') return remotes[k] ? remotes[k].slot : 0;
+            return cpus[k] ? cpus[k].slot : 0;
         }
 
         function others() {
@@ -375,38 +418,106 @@
             return ms.filter(function (m) { return m.mid !== net.mid && m.connected && m.role !== 'pending'; });
         }
 
-        function freeSlot(slot) {
-            var mid = slots[slot];
+        /* keep: the slot stays a puppet (it only changes who it shows) */
+        function freeSlot(slot, keep) {
+            var k = slots[slot];
             slots[slot] = null;
             applied[slot] = null;
-            if (remotes[mid]) remotes[mid].slot = 0;
+            if (typeof k === 'number' && remotes[k]) remotes[k].slot = 0;
+            else if (k !== null && cpus[k]) cpus[k].slot = 0;
+            if (keep) return;
             if (puppetOn[slot] && !missing.length) M._PortCoopSetPuppet(slot, 0);
             puppetOn[slot] = false;
         }
+        function place(slot, k) {
+            if (slots[slot] !== null) freeSlot(slot, true);
+            slots[slot] = k;
+            applied[slot] = null;
+            if (typeof k === 'number') remotes[k].slot = slot;
+            else if (cpus[k]) cpus[k].slot = slot;
+        }
 
-        /* Sticky: a player keeps their slot while connected; free slots go
-         * to the rest in seat order (then join order). */
-        function assign() {
-            var os = others();
-            var here = {};
+        /* Who runs the CPU Kirbys for everyone: the lowest member id among the
+         * players in a level and past their tutorial (null: nobody is).  Every
+         * page computes the same from the same poses; a brief disagreement
+         * means two copies of the helpers, or none, for a moment. */
+        /* A player stays able to run them for AUTH_GRACE after they last
+         * could: a door, a warp or a level load must not move the helpers
+         * (each move respawns them), leaving the game or going back into a
+         * tutorial does.  A player who leaves the room stops at once. */
+        var canSeen = {};
+        function canRun(b) { return b && (b[27] & F2_INLEVEL) && !(b[27] & F2_TUTORIAL); }
+        function authority(t) {
+            if (canRun(tx.last)) canSeen[net.mid] = t;
+            for (var mid in remotes) {
+                var r = remotes[mid];
+                if (t - r.jb.lastArrival <= STALL_MS && canRun(r.jb.newest())) canSeen[mid] = t;
+            }
+            var best = null;
+            for (var m in canSeen) {
+                if (t - canSeen[m] > AUTH_GRACE || (+m !== net.mid && !remotes[m])) { delete canSeen[m]; continue; }
+                if (best === null || +m < best) best = +m;
+            }
+            return best;
+        }
+
+        /* Sticky: a player keeps their slot while connected; free slots go to
+         * the rest in seat order (then join order), then to the CPU Kirbys the
+         * runner's game sends (when that is not this page), and a page that
+         * does not run the CPU Kirbys fills what is left with nobody, so it
+         * has no helpers of its own that the others cannot see.  Players
+         * come first: a CPU Kirby gives its slot up to a player. */
+        function roster() {
+            var os = others(), here = {};
             os.forEach(function (m) {
                 here[m.mid] = true;
                 var r = remote(m.mid);
                 r.name = m.name; r.seat = m.seat;
             });
-            for (var s = 1; s <= SLOTS; s++) if (slots[s] !== null && !here[slots[s]]) freeSlot(s);
-            for (var mid in remotes) if (!here[mid]) delete remotes[mid];
+            for (var mid in remotes) if (!here[mid]) {
+                if (remotes[mid].src >= 0) fx.srcUsed[remotes[mid].src] = false;
+                delete remotes[mid];
+            }
+            for (var k in cpus) if (!here[cpus[k].mid]) delete cpus[k];
             for (var fm in world.fullTo) if (!here[fm]) delete world.fullTo[fm];
+            assign();
+        }
+        function assign() {
+            var os = others(), t = now();
             os.sort(function (a, b) { return ((a.seat < 0 ? 1e9 : a.seat) - (b.seat < 0 ? 1e9 : b.seat)) || a.mid - b.mid; });
+            var humans = os.map(function (m) { return m.mid; }).filter(function (mid) { return remotes[mid]; });
+            var auth = cpu.on && fxOk ? authority(t) : null;
+            cpu.auth = auth;
+            var helpers = [];
+            if (auth !== null && auth !== net.mid && remotes[auth]) {
+                var seen = remotes[auth].cpuSeen;
+                for (var id in seen) if (t - seen[id] < STALL_MS) helpers.push(cpuKey(auth, +id));
+                helpers.sort();
+            }
+            var want = {}, s;
+            humans.concat(helpers).forEach(function (k) { want[k] = true; });
+            for (s = 1; s <= SLOTS; s++) {
+                var cur = slots[s];
+                if (cur !== null && !isBlank(cur) && !want[cur]) freeSlot(s, auth !== null && auth !== net.mid);
+            }
+            function take(k, evict) {
+                if (slotOfKey(k)) return true;
+                var s2;
+                for (s2 = 1; s2 <= SLOTS; s2++) if (slots[s2] === null) { place(s2, k); return true; }
+                for (s2 = 1; s2 <= SLOTS; s2++) if (isBlank(slots[s2])) { place(s2, k); return true; }
+                if (evict) for (s2 = SLOTS; s2 >= 1; s2--)
+                    if (typeof slots[s2] === 'string') { place(s2, k); return true; }
+                return false;
+            }
             var shown = 0;
-            os.forEach(function (m) {
-                var r = remotes[m.mid];
-                if (!r.slot) {
-                    for (var s = 1; s <= SLOTS; s++) if (slots[s] === null) { slots[s] = m.mid; r.slot = s; break; }
-                }
-                if (r.slot) shown++;
-            });
+            humans.forEach(function (mid) { if (take(mid, true)) shown++; });
+            helpers.forEach(function (k) { take(k, false); });
             hiddenOthers = os.length - shown;
+            var blanks = auth !== null && auth !== net.mid;
+            for (s = 1; s <= SLOTS; s++) {
+                if (slots[s] === null && blanks) slots[s] = 'x' + s;
+                else if (isBlank(slots[s]) && !blanks) freeSlot(s);
+            }
         }
 
         /* Our own colour: the seat's (pink, yellow, red, green, then the
@@ -433,15 +544,60 @@
             M._PortCoopSetLocalColor(c);
         }
 
-        net.on('roster', assign);
+        net.on('roster', roster);
         net.on('welcome', function () {
             /* (re)connected: start every stream over */
-            for (var mid in remotes) remotes[mid].jb.reset();
+            for (var mid in remotes) { remotes[mid].jb.reset(); remotes[mid].fx = []; }
+            for (var ck in cpus) cpus[ck].jb.reset();
             tx.key = true;
             world.fullTo = {};      /* deltas sent while we were away were lost */
         });
+        /* extras: the CPU Kirbys a sender runs, and what its spawned objects
+         * drew, per pose (see FX above) */
+        function extras(from, str) {
+            var r = remotes[from], b, t = now();
+            if (!r || !fxOk) return;
+            try { b = unb64(str); } catch (e) { return; }
+            if (b.length < 2 || b[0] !== 1) return;
+            if (r.fxResets !== r.jb.resets) { r.fx = []; r.fxResets = r.jb.resets; }
+            for (var i = 0, n = b[1], o = 2; i < n; i++) {
+                if (o + 3 > b.length) return;
+                var seq = b[o] | (b[o + 1] << 8), nc = b[o + 2];
+                o += 3;
+                for (var j = 0; j < nc; j++) {
+                    if (o + 1 + size > b.length) return;
+                    var id = b[o];
+                    if (id >= 1 && id <= SLOTS) {
+                        cpuOf(from, id).jb.push(seq, b.slice(o + 1, o + 1 + size), t, 0);
+                        r.cpuSeen[id] = t;
+                        fx.stats.cpuRecv++;
+                    }
+                    o += 1 + size;
+                }
+                if (o + 2 > b.length) return;
+                var fl = b[o] | (b[o + 1] << 8);
+                o += 2;
+                if (fl) {
+                    if (fl < 4 || fl > FX_BYTES || o + fl > b.length) return;
+                    r.fx.push({ t: r.jb.tOf(seq), b: b.slice(o, o + fl) });
+                    if (r.fx.length > 24) r.fx.shift();
+                    fx.stats.framesRecv++;
+                    o += fl;
+                }
+            }
+        }
         net.on('signal', function (m) {
             var d = m && m.data;
+            if (d && typeof d.x === 'string') { extras(m.from, d.x); return; }
+            if (d && Array.isArray(d.call)) {
+                /* someone called the helpers, and this page runs them */
+                if (cpu.auth === net.mid && typeof M._PortCoopAnswerCall === 'function' && remotes[m.from]) {
+                    var c = d.call.map(function (v) { return v | 0; });
+                    var came = M._PortCoopAnswerCall(c[0], c[1], c[2]);
+                    log('[coop] ' + nameOf(m.from) + ' called the helpers: ' + came + ' on the way');
+                }
+                return;
+            }
             if (d && enemyOk && enemy.share && (typeof d.en === 'string' || typeof d.ev === 'string')) {
                 var eb;
                 try { eb = unb64(typeof d.en === 'string' ? d.en : d.ev); } catch (e) { return; }
@@ -474,6 +630,60 @@
                 r.jb.push(p.poses[i].seq, p.poses[i].bytes, t, i === 0 ? p.flags : (p.flags & ~F_KEY));
         });
 
+        /* This frame's extras: the CPU Kirbys this page runs for everyone (when
+         * it is the one that does), and what spawned objects drew. */
+        function sampleExtras() {
+            if (!fxOk) return null;
+            var list = [], fb = null, s, p = bufPtr(4);
+            if (cpu.on && cpu.auth === net.mid)
+                for (s = 1; s <= SLOTS; s++)
+                    if (slots[s] === null && M._PortCoopSlotPose(s, p)) list.push({ id: s, b: heap().slice(p, p + size) });
+            var fp = M._PortCoopFxBuffer(), n = M._PortCoopFxTake(fp, FX_BYTES);
+            if (n >= 4) { fb = heap().slice(fp, fp + n); fx.lastOut = fb; }
+            if (!list.length && !fb) return null;
+            fx.stats.cpuSent += list.length;
+            if (fb) fx.stats.framesSent++;
+            return { cpus: list, fx: fb };
+        }
+        function encodeExtras(poses) {
+            var any = false, len = 2, i, j;
+            for (i = 0; i < poses.length; i++) {
+                var x = poses[i].x;
+                len += 5;
+                if (!x) continue;
+                any = true;
+                len += x.cpus.length * (1 + size) + (x.fx ? x.fx.length : 0);
+            }
+            if (!any) return undefined;
+            var out = new Uint8Array(len), o = 2;
+            out[0] = 1;
+            out[1] = poses.length;
+            for (i = 0; i < poses.length; i++) {
+                var e = poses[i].x;
+                out[o] = poses[i].seq & 255; out[o + 1] = (poses[i].seq >> 8) & 255;
+                out[o + 2] = e ? e.cpus.length : 0;
+                o += 3;
+                if (e) for (j = 0; j < e.cpus.length; j++) { out[o] = e.cpus[j].id; out.set(e.cpus[j].b, o + 1); o += 1 + size; }
+                var fl = e && e.fx ? e.fx.length : 0;
+                out[o] = fl & 255; out[o + 1] = fl >> 8;
+                o += 2;
+                if (fl) { out.set(e.fx, o); o += fl; }
+            }
+            return b64(out);
+        }
+
+        /* The local player used the phone: the game that runs the helpers
+         * sends them (that game's own phone needs nothing from here). */
+        var callBuf = 0;
+        function callTick() {
+            if (typeof M._PortCoopTakeCall !== 'function') return;
+            if (!callBuf) callBuf = M._malloc(12);
+            if (!M._PortCoopTakeCall(callBuf)) return;
+            var v = new Int32Array(heap().buffer, callBuf, 3);
+            if (cpu.auth !== null && cpu.auth !== net.mid && net.state === 'open')
+                net.sendSignal(cpu.auth, { call: [v[0], v[1], v[2]] });
+        }
+
         function send(t) {
             var open = net.state === 'open';
             var anyone = open && others().length > 0;
@@ -485,9 +695,10 @@
             var ptr = bufPtr(0);
             var b = M._PortCoopLocalPose(ptr) ? heap().slice(ptr, ptr + size) : hiddenPose(size);
             var seq = Math.round(t / FRAME_MS) & 0xFFFF;
+            var ext = sampleExtras();
             var pend = tx.pending;
-            if (pend.length && pend[pend.length - 1].seq === seq) pend[pend.length - 1].bytes = b;
-            else pend.push({ seq: seq, bytes: b });
+            if (pend.length && pend[pend.length - 1].seq === seq) { pend[pend.length - 1].bytes = b; pend[pend.length - 1].x = ext; }
+            else pend.push({ seq: seq, bytes: b, x: ext });
             if (pend.length > 4) pend.splice(0, pend.length - 4);
             /* a sample left over from before a freeze would arrive seconds late and
              * make the receiver think the link is that jittery */
@@ -502,7 +713,7 @@
                 tx.pending = [];
                 return;
             }
-            tx.unchanged = same(b, tx.last) ? tx.unchanged + 1 : 0;
+            tx.unchanged = same(b, tx.last) && !ext ? tx.unchanged + 1 : 0;
             tx.last = b;
             var since = t - tx.lastAt;
             var idle = tx.unchanged >= IDLE_AFTER;
@@ -510,7 +721,7 @@
                                       : (pend.length >= 2 && since >= SEND_MIN_MS) || since >= SEND_MAX_MS);
             if (!due) return;
             var poses = idle ? [pend[pend.length - 1]] : pend;
-            if (net.sendPose(encodePoseUp(tx.key ? F_KEY : 0, poses))) {
+            if (net.sendPose(encodePoseUp(tx.key ? F_KEY : 0, poses), encodeExtras(poses))) {
                 stats.sent++;
                 stats.sentPoses += poses.length;
                 tx.key = false;
@@ -530,7 +741,7 @@
                 var mid = slots[s];
                 if (mid === null) continue;
                 if (!puppetOn[s]) { M._PortCoopSetPuppet(s, 1); puppetOn[s] = true; }
-                var r = remotes[mid];
+                var r = typeof mid === 'number' ? remotes[mid] : cpus[mid];
                 var out = open && r ? r.jb.sample(t) : { state: 'absent', away: true };
                 if (r) r.out = out;
                 if (out.state === 'pose') {
@@ -542,6 +753,38 @@
                     M._PortCoopSetAbsent(s);
                     applied[s] = null;
                 }
+            }
+            applyFx();
+        }
+
+        /* Each sender's spawned objects, at the frame its pose is being played
+         * at, with its Kirby palettes moved to the slots showing those Kirbys. */
+        function applyFx() {
+            if (!fxOk) return;
+            var fp = M._PortCoopFxBuffer();
+            for (var mid in remotes) {
+                var r = remotes[mid], fr = null;
+                if (r.src < 0) {
+                    for (var q = 0; q < FX_SOURCES; q++) if (!fx.srcUsed[q]) { fx.srcUsed[q] = true; r.src = q; break; }
+                    if (r.src < 0) continue;
+                }
+                if (r.fxResets !== r.jb.resets) { r.fx = []; r.fxResets = r.jb.resets; }
+                var c = r.jb.cursor;
+                if (!r.fx.length || c === null || !r.out || r.out.state !== 'pose') continue;
+                while (r.fx.length && r.fx[0].t < c - 6) r.fx.shift();
+                for (var i = r.fx.length - 1; i >= 0; i--) if (r.fx[i].t <= c + 0.5) { fr = r.fx[i]; break; }
+                if (!fr || c - fr.t > 2.5) continue;
+                var b = fr.b.slice(), n = b[2];
+                for (var k = 0; k < n && 4 + (k + 1) * FX_REC <= b.length; k++) {
+                    var o = 4 + k * FX_REC + 10, pal = b[o];
+                    if (pal >= 8) continue;
+                    var ks = pal & 3, sl = slotOfKey(ks === 0 ? +mid : cpuKey(mid, ks));
+                    b[o] = sl ? ((pal & 4) | sl) : 0xFF;
+                    if (!sl) { var uk = mid + ':' + pal; fx.stats.unmapped[uk] = (fx.stats.unmapped[uk] || 0) + 1; }
+                }
+                heap().set(b, fp);
+                M._PortCoopFxSet(r.src, fp, b.length);
+                fx.stats.framesSet++;
             }
         }
 
@@ -566,7 +809,8 @@
          * gKirbys (more than four) will add ids of their own. */
         var TAG_MAX = 16, tagBuf = 0;
         function midOfDrawId(id) {
-            return id >= 1 && id <= SLOTS ? slots[id] : null;
+            var k = id >= 1 && id <= SLOTS ? slots[id] : null;
+            return typeof k === 'number' ? k : null;   /* CPU Kirbys get no tag */
         }
         function bytesOfDrawId(id) {
             return id >= 1 && id <= SLOTS ? applied[id] : null;
@@ -741,6 +985,12 @@
                 var t = now();
                 stats.frames++;
                 colorTick();
+                if (fxOk) {
+                    var want = fx.on && net.state === 'open' && others().length > 0;
+                    if (fx.shareSet !== want) { M._PortCoopFxShare(want ? 1 : 0); fx.shareSet = want; }
+                }
+                assign();
+                callTick();
                 send(t);
                 apply(t);
                 enemyTick(t);
@@ -756,6 +1006,7 @@
                 if (!on) {
                     tx.key = true;
                     for (var mid in remotes) remotes[mid].jb.reset();
+                    for (var ck in cpus) cpus[ck].jb.reset();
                 }
             },
             stop: function () {
@@ -765,6 +1016,8 @@
                 if (worldOk && world.shareSet) M._PortCoopWorldShare(0);
                 if (enemyOk && enemy.shareSet) M._PortCoopEnemyShare(0);
                 enemy.shareSet = null;
+                if (fxOk && fx.shareSet) M._PortCoopFxShare(0);
+                fx.shareSet = null;
                 if (typeof M._PortCoopSetLocalColor === 'function') M._PortCoopSetLocalColor(-1);
                 myColor = null;
                 world.shareSet = null;
@@ -778,6 +1031,18 @@
             colorOf: function (mid) { var r = remotes[mid]; return r && r.slot ? colorOf(applied[r.slot]) : null; },
             myColor: function () { return colorOf(tx.last); },
             applied: function (slot) { return applied[slot]; },
+            /* tests and the chip: who runs the CPU Kirbys, what each slot shows,
+             * and the spawned-object counters (engine: PortCoopFxStat) */
+            cpuState: function () {
+                var cs = {};
+                for (var k in cpus) cs[k] = cpus[k].slot;
+                return { auth: cpu.auth, me: net.mid, slots: slots.slice(), on: cpu.on && fxOk, cpus: cs };
+            },
+            fxStats: function () {
+                var e = [];
+                if (fxOk) for (var i = 0; i < 11; i++) e.push(M._PortCoopFxStat(i));
+                return { page: fx.stats, engine: e, lastOut: fx.lastOut || null };
+            },
             /* for the status chip */
             status: function () {
                 var list = others().map(function (m) {
@@ -850,7 +1115,7 @@
         create: create, JitterBuffer: JitterBuffer, encodePoseUp: encodePoseUp,
         decodePoseBody: decodePoseBody, poseX: poseX, poseY: poseY, poseRoom: poseRoom,
         poseHidden: poseHidden, lerpPose: lerpPose,
-        WORLD: WORLD, NEWS: NEWS, ENEMY: ENEMY, EnemyBuffer: EnemyBuffer, describeNews: describeNews, b64: b64, unb64: unb64,
+        WORLD: WORLD, NEWS: NEWS, ENEMY: ENEMY, FX: FX, EnemyBuffer: EnemyBuffer, describeNews: describeNews, b64: b64, unb64: unb64,
     };
 }));
 
