@@ -102,8 +102,9 @@ static const char *kRcFs =
     /* What the segment a -> b sees, for a probe at o: vec4(radiance, the
      * transmittance).  From inside solid ground (inS) light comes through
      * the probe's own ground fading by e every uGround.x px of it (beyond 6
-     * of those, none), so the face of the ground is lit at its edges and
-     * dark inside; any other solid blocks.  Inside a sprite (inP) sprites
+     * of those, none) -- or, by default, not fading at all, so the ground is
+     * lit like its own surface (render_list.h solidShade); any other solid
+     * blocks.  Inside a sprite (inP) sprites
      * do not block. */
     "vec4 trace(vec2 o, bool inS, bool inP, vec2 a, vec2 b) {\n"
     "  vec2 d = b - a;\n"
@@ -122,19 +123,26 @@ static const char *kRcFs =
     /* The cells, DDA, up to the nearest lamp. */
     "  float lam = max(uGround.x, 0.5), run = 0.0;\n"
     "  bool orig = inS;\n"
+    /* Still inside the probe's own ground at a?  Walk the solid cells from
+     * o; the first cell that is not solid ends it (a jump-through band is
+     * not ground for this).  By cells, so it is exact however deep the probe
+     * is: with the ground not darkened (uGround.x huge) a deep probe sees
+     * out of its ground's surface, never through a second solid. */
     "  if (inS && ao > 0.0) {\n"
-    "    vec2 dn = (a - o) / ao;\n"
-    "    float lim = min(ao, 6.0 * lam);\n"
-    "    for (int i = 0; i < 40; i++) {\n"
-    "      float t = (float(i) + 0.5) * 1.5;\n"
-    "      if (t >= lim) break;\n"
-    "      if (!solidAt(o + dn * t)) { orig = false; break; }\n"
-    "      run = t;\n"
+    "    vec2 e = a - o;\n"
+    "    ivec2 k = ivec2(floor(o / 16.0));\n"
+    "    ivec2 ks = ivec2(e.x > 0.0 ? 1 : -1, e.y > 0.0 ? 1 : -1);\n"
+    "    vec2 ki = vec2(abs(e.x) > 1e-5 ? 1.0 / abs(e.x) : 1e9, abs(e.y) > 1e-5 ? 1.0 / abs(e.y) : 1e9);\n"
+    "    vec2 km = abs(vec2(k + max(ks, ivec2(0))) * 16.0 - o) * ki, kd = 16.0 * ki;\n"
+    "    for (int i = 0; i < 64; i++) {\n"
+    "      if (cellAt(k) != 1) { orig = false; break; }\n"
+    "      float k1 = min(min(km.x, km.y), 1.0);\n"
+    "      run = k1 * ao;\n"
+    "      if (run >= 6.0 * lam) return vec4(0.0);\n"
+    "      if (k1 >= 1.0) break;\n"
+    "      if (km.x < km.y) { k.x += ks.x; km.x += kd.x; } else { k.y += ks.y; km.y += kd.y; }\n"
     "    }\n"
-    "    if (orig) {\n"
-    "      if (ao >= 6.0 * lam) return vec4(0.0);\n"
-    "      run = ao;\n"
-    "    }\n"
+    "    if (orig) run = ao;\n"
     "  }\n"
     "  float sMax = min(sHit, 1.0);\n"
     "  ivec2 c = ivec2(floor(a / 16.0));\n"

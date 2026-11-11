@@ -445,11 +445,18 @@ map texture holds the previous and the current map; `lightMix` blends them),
 so the shadows glide at a fraction of a full build's cost per frame.
 `?normals=4` shows the shadow map.
 
-*Light into the ground* (0-48 px, 12 by default; it was a fixed 36): a ray
-that starts inside solid ground counts from where it leaves it only if it
-does within this distance, otherwise the ground there is in shade.  0 shades
-solid ground from its surface down -- which also shows where the collision
-grid and the art disagree (solid cells with nothing drawn on them).
+**Solid ground is not darkened** (since 2026-11-10; the owner found blocks
+and terrain too dark): a ray that starts inside solid ground goes on to
+where it leaves that body of ground, however deep, so the ground is lit like
+its own exposed surface and only a shadow cast by something else darkens it.
+*Darken inside solid ground* (off by default) brings back the old look:
+
+*Light into the ground* (0-48 px, 3 by default; only with *Darken inside
+solid ground*): a ray that starts inside solid ground counts from where it
+leaves it only if it does within this distance, otherwise the ground there
+is in shade.  0 shades solid ground from its surface down -- which also
+shows where the collision grid and the art disagree (solid cells with
+nothing drawn on them).
 
 **Character shadows** (Settings > Lighting, 1 = as dark as the level's, 0
 off): the level's own sun shadows with Kirby and the enemies as the
@@ -537,8 +544,10 @@ Illumination* (shadertoy.com/view/NttSW7).
   it within *Character shadow length* of a probe (and a probe inside a
   sprite sees past it, so characters are lit, not black); the room's lamps
   are 3 px discs in their own colour.  A probe inside solid ground sees
-  through its own ground with light fading by e every 2.5 x *Light into the
-  ground* px, so blocks and the ground's face are lit at their edges.
+  through its own ground (walked cell by cell to where the ray leaves it, so
+  never through a second solid), so solid ground is lit like its surface;
+  with *Darken inside solid ground* the light fades by e every 2.5 x *Light
+  into the ground* px instead, lighting blocks only at their edges.
 - **Sky**: a ray that gets past the last cascade unblocked sees Mathis's sky
   (the area's shade tint, brighter overhead) plus a sun lobe at the area's
   angle (its lift colour, 60% of the open sky's light, as wide as *Shadow

@@ -287,10 +287,13 @@ typedef struct PortLightParams {
     float indoorShade;  /* point-lit rooms: shade away from the lamps, 0..1 */
     int engine;         /* LIGHT_ENGINE_*                                   */
     float bounce;       /* radiance cascades: light off solids, 0..1        */
+    int solidShade;     /* 1: solid ground darkens below `depth` px; 0 (the
+                         * default): light goes through a solid body, so the
+                         * ground is lit like its own surface               */
 } PortLightParams;
 #define PORT_LIGHT_PARAMS_DEFAULT { LIGHT_REQ_AUTO, 2.0f, 0.30f, 0.35f, 35.0f, 0.35f, 0.5f, 1.0f, \
                                     0.5f, 0.10f, 0.8f, 0, 5.0f, 1.0f, 0, 3.0f, 16.0f, 3.0f, 1, 0.12f, \
-                                    LIGHT_ENGINE_CLASSIC, 0.5f }
+                                    LIGHT_ENGINE_CLASSIC, 0.5f, 0 }
 extern PortLightParams gPortLightParams;
 extern int gPortLighting, gPortLightingDefault, gPortLightingUser;
 /* 1: lit frames show their normal maps (web ?normals=1, KATAM_RELIEF_VIEW=1);

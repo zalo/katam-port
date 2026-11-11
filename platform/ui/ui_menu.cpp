@@ -618,7 +618,16 @@ static int PageDisplay(void)
         changed |= ImGui::SliderFloat("##lk", &s.lightStrength, 0.0f, 3.0f, "Strength %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##ls", &s.lightShadow, 0.0f, 0.8f, "Shadow darkness %.2f", ImGuiSliderFlags_AlwaysClamp);
         changed |= ImGui::SliderFloat("##lf", &s.lightSoft, 0.0f, 1.0f, "Shadow softness %.2f", ImGuiSliderFlags_AlwaysClamp);
+        {
+            bool dark = s.lightSolidShade != 0;
+            if (ImGui::Checkbox("Darken inside solid ground", &dark)) {
+                s.lightSolidShade = dark ? 1 : 0;
+                changed = 1;
+            }
+        }
+        ImGui::BeginDisabled(s.lightSolidShade == 0);
         changed |= ImGui::SliderFloat("##lp", &s.lightDepth, 0.0f, 48.0f, "Light into the ground %.0f px", ImGuiSliderFlags_AlwaysClamp);
+        ImGui::EndDisabled();
         changed |= ImGui::SliderFloat("##li", &s.lightIndoor, 0.0f, 1.0f, "Indoor shade %.2f (away from lamps)", ImGuiSliderFlags_AlwaysClamp);
         ImGui::BeginDisabled(s.lightMode == 2);
         {
@@ -693,6 +702,7 @@ static int PageDisplay(void)
             s.lightReliefOn = d.lightReliefOn;
             s.lightIndoor = d.lightIndoor;
             s.lightBounce = d.lightBounce;
+            s.lightSolidShade = d.lightSolidShade;
             /* The engine is a choice, not a tuning: Reset keeps it. */
             changed = 1;
         }

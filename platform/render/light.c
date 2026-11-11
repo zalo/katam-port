@@ -240,13 +240,22 @@ static u8 CellOcc(u8 g)
     return 0;
 }
 
-/* How far into solid ground light reaches, in march steps: a ray that starts
- * inside the ground counts from where it leaves it, if it does within this
- * many steps (gPortLightParams.depth, px), and is blocked otherwise.  0: the
- * ground is shaded from its surface down. */
+/* How far into solid ground light reaches, px.  With solidShade off (the
+ * default) there is no limit: a ray that starts inside the ground goes on to
+ * where it leaves that body of ground, so solid things are lit like their
+ * own surface and only shadows cast by something else darken them. */
+#define LIGHT_DEPTH_ALL 4096.0f
+static float EffDepth(const PortLightParams *P)
+{
+    return P->solidShade ? P->depth : LIGHT_DEPTH_ALL;
+}
+
+/* ... in march steps: a ray that starts inside the ground counts from where
+ * it leaves it, if it does within this many steps, and is blocked otherwise.
+ * 0: the ground is shaded from its surface down. */
 static int DepthSteps(void)
 {
-    float d = gPortLightParams.depth;
+    float d = EffDepth(&gPortLightParams);
     return d <= 0.0f ? 0 : (int)(d / LIGHT_STEP + 0.5f);
 }
 
@@ -621,7 +630,7 @@ static void Build(const u8 *grid, s32 cw, s32 ch, float angle, int mode)
     sBuiltMode = mode;
     sBuiltReq = gPortLightParams.mode;
     sBuiltSoft = gPortLightParams.soft;
-    sBuiltDepth = gPortLightParams.depth;
+    sBuiltDepth = EffDepth(&gPortLightParams);
     sGrid = grid;
     sOccGen++;
     sBuiltAngle = angle;
@@ -734,7 +743,7 @@ void PortLightRefreshParams(RlFrame *f)
     /* A map parameter changed on a held frame: build the map again from
      * the same room's grid (the game is not running, so it is the same). */
     if (sGrid && f->light == sMask
-        && (P->mode != sBuiltReq || P->soft != sBuiltSoft || P->depth != sBuiltDepth
+        && (P->mode != sBuiltReq || P->soft != sBuiltSoft || EffDepth(P) != sBuiltDepth
             || (sBuiltMode == RL_LIGHT_SUN && !anim && base != sBuiltAngle))) {
         Build(sGrid, sCw, sCh, anim ? sCurAngle : base,
               DecideMode(sRoom, sGrid, sCw, sCh, P->mode, sEnv->angle));
@@ -754,7 +763,7 @@ void PortLightRefreshParams(RlFrame *f)
     }
     f->lightCharReach = P->charReach;
     f->lightEngine = (u8)P->engine;
-    f->lightDepth = P->depth;
+    f->lightDepth = EffDepth(P);
     f->lightBounce = P->bounce;
     f->lightCharDepth = P->charDepth;
     f->lightSoft = P->soft;
@@ -915,7 +924,7 @@ static void Attach(RlFrame *f, int roomBg)
          * sun's angle is the pipeline's business (SunStep). */
         const PortLightParams *P = &gPortLightParams;
         int stale = P->mode != sBuiltReq || mode != sBuiltMode || P->soft != sBuiltSoft
-                    || P->depth != sBuiltDepth
+                    || EffDepth(P) != sBuiltDepth
                     || (mode == RL_LIGHT_SUN && !anim && target != sBuiltAngle);
         if (stale && now - sLastBuild >= 200.0)
             sHave = 0;

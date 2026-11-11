@@ -73,6 +73,7 @@ void LightDefaults(PortSettings *s)
         s->lightIndoor = kL.indoorShade;
         s->lightEngine = kL.engine;
         s->lightBounce = kL.bounce;
+        s->lightSolidShade = kL.solidShade;
     }
 }
 
@@ -123,6 +124,7 @@ void PortSettingsClamp(PortSettings *s)
     s->lightIndoor = ClampF(s->lightIndoor, 0.0f, 1.0f);
     s->lightEngine = ClampI(s->lightEngine, 0, 1);
     s->lightBounce = ClampF(s->lightBounce, 0.0f, 1.0f);
+    s->lightSolidShade = ClampI(s->lightSolidShade, 0, 1);
 }
 
 void PortSettingsParse(PortSettings *s, const char *text)
@@ -194,6 +196,7 @@ void PortSettingsParse(PortSettings *s, const char *text)
                 FLT_KEY("lightindoor", lightIndoor)
                 INT_KEY("lightengine", lightEngine)
                 FLT_KEY("lightbounce", lightBounce)
+                INT_KEY("lightsolid", lightSolidShade)
                 else if (strcmp(key, "lightver") == 0) lightVer = (int)strtol(val, NULL, 0);
 #undef INT_KEY
 #undef FLT_KEY
@@ -229,7 +232,7 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       "lightshine2=%.3f\nlightheight=%.3f\nlightsunanim=%d\n"
                       "lightsunspeed=%.2f\nlightcharshadow=%.3f\nlightreliefbg=%d\n"
                       "lightdepth=%.1f\nlightcharreach=%.1f\nlightchardepth=%.1f\nlightreliefon=%d\nlightindoor=%.3f\n"
-                      "lightengine=%d\nlightbounce=%.3f\n",
+                      "lightengine=%d\nlightbounce=%.3f\nlightsolid=%d\n",
                       LIGHT_SETTINGS_VER, s->lightOn, s->lightMode, (double)s->lightStrength,
                       (double)s->lightShadow, (double)s->lightSoft,
                       (double)s->lightAngle, (double)s->lightWarm,
@@ -239,7 +242,7 @@ int PortSettingsFormat(const PortSettings *s, char *buf, int size)
                       (double)s->lightSprShadow, s->lightReliefBg,
                       (double)s->lightDepth, (double)s->lightCharReach,
                       (double)s->lightCharDepth, s->lightReliefOn, (double)s->lightIndoor,
-                      s->lightEngine, (double)s->lightBounce);
+                      s->lightEngine, (double)s->lightBounce, s->lightSolidShade);
     return n < size ? n : size - 1;
 }
 
