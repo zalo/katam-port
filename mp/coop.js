@@ -94,6 +94,15 @@
     var F2_INLEVEL = 2, F2_TUTORIAL = 4;  /* pose byte 27 */
     var AUTH_GRACE = 5000;                /* ms; see authority() */
 
+    /* The live room (platform/coop_room.c): blocks broken, buttons, ability
+     * stars.  Optional.  Signals: {tb} tile breaks to everyone, {ts} the
+     * breaks of my room to a player who walks in, {sp: [id, room, x, y,
+     * ability, type, flags]} a star I dropped, {tk: [ownerMid, id]} a star
+     * swallowed, {bh} buttons hit. */
+    var ROOM = ['_PortCoopRoomShare', '_PortCoopTilesTake', '_PortCoopTilesApply', '_PortCoopTilesSnapshot',
+                '_PortCoopTilesSetSnapshot', '_PortCoopStarTake', '_PortCoopStarSpawn', '_PortCoopStarTaken',
+                '_PortCoopRoomForget', '_PortCoopButtonsTake', '_PortCoopButtonsApply'];
+
     /* Stage 3, shared enemies (platform/coop_enemy.c).  Optional too. */
     var ENEMY = ['_PortCoopEnemyShare', '_PortCoopEnemyCollect', '_PortCoopEnemySetPoses', '_PortCoopEnemyTake',
                  '_PortCoopEnemyEvent'];
@@ -384,6 +393,11 @@
         var fxOk = !missing.length && FX.every(function (n) { return typeof M[n] === 'function'; });
         var cpu = { on: opts.cpus !== false, auth: null };
         var fx = { on: opts.fx !== false, shareSet: null, srcUsed: [], stats: { framesSent: 0, framesRecv: 0, framesSet: 0, cpuSent: 0, cpuRecv: 0, unmapped: {} } };
+        /* the live room */
+        var roomOk = fxOk && ROOM.every(function (n) { return typeof M[n] === 'function'; });
+        var room = { on: opts.room !== false, shareSet: null,
+                     stats: { tilesSent: 0, tilesRecv: 0, tilesApplied: 0, snapsSent: 0, snapsRecv: 0,
+                              starsSent: 0, starsRecv: 0, starsMade: 0, takenSent: 0, takenRecv: 0 } };
         /* shared enemies */
         var enemyOk = !missing.length && ENEMY.every(function (n) { return typeof M[n] === 'function'; });
         var enemy = { share: opts.enemies !== false, shareSet: null, buf: new EnemyBuffer(), inbox: [], lastSent: -Infinity,
@@ -479,7 +493,10 @@
                 r.name = m.name; r.seat = m.seat;
             });
             for (var mid in remotes) if (!here[mid]) {
-                if (remotes[mid].src >= 0) fx.srcUsed[remotes[mid].src] = false;
+                if (remotes[mid].src >= 0) {
+                    fx.srcUsed[remotes[mid].src] = false;
+                    if (roomOk) M._PortCoopRoomForget(remotes[mid].src);
+                }
                 delete remotes[mid];
             }
             for (var k in cpus) if (!here[cpus[k].mid]) delete cpus[k];
@@ -593,6 +610,11 @@
         net.on('signal', function (m) {
             var d = m && m.data;
             if (d && typeof d.x === 'string') { extras(m.from, d.x); return; }
+            if (d && (typeof d.tb === 'string' || typeof d.ts === 'string' || typeof d.bh === 'string'
+                      || Array.isArray(d.sp) || Array.isArray(d.tk))) {
+                roomSignal(m.from, d);
+                return;
+            }
             if (d && Array.isArray(d.call)) {
                 /* someone called the helpers, and this page runs them */
                 if (cpu.auth === net.mid && typeof M._PortCoopAnswerCall === 'function' && remotes[m.from]) {
@@ -674,6 +696,85 @@
                 if (fl) { out.set(e.fx, o); o += fl; }
             }
             return b64(out);
+        }
+
+        /* The live room.  Breaks and stars made here go to everyone; a player
+         * whose pose arrives in my room (from another one) gets my room's
+         * breaks; what arrives is applied by the engine, which checks the
+         * room and the tile itself. */
+        function roomTick() {
+            if (!roomOk || !room.shareSet) return;
+            var p = M._PortCoopFxBuffer(), n, i, b;
+            n = M._PortCoopTilesTake(p, 320);
+            if (n > 0) {
+                net.sendSignal(null, { tb: b64(heap().slice(p, p + n)) });
+                room.stats.tilesSent += n / 5;
+            }
+            n = M._PortCoopButtonsTake(p, 32);
+            if (n > 0) net.sendSignal(null, { bh: b64(heap().slice(p, p + n)) });
+            n = M._PortCoopStarTake(p, 16);
+            for (i = 0; i < n; i++) {
+                b = heap().slice(p + i * 12, p + i * 12 + 12);
+                var dv = new DataView(b.buffer);
+                if (b[0] === 1) {
+                    net.sendSignal(null, { sp: [b[1], dv.getUint16(4, true), dv.getInt16(6, true), dv.getInt16(8, true),
+                                                b[3], b[10], b[11]] });
+                    room.stats.starsSent++;
+                } else if (b[0] === 2) {
+                    var owner = b[2] === 255 ? net.mid : null;
+                    for (var om in remotes) if (remotes[om].src === b[2]) owner = +om;
+                    if (owner !== null) { net.sendSignal(null, { tk: [owner, b[1]] }); room.stats.takenSent++; }
+                }
+            }
+            var mine = tx.last && canRun(tx.last) ? poseRoom(tx.last) : null;
+            for (var mid in remotes) {
+                var r = remotes[mid], nb = r.jb.newest(), rr = nb && (nb[27] & F2_INLEVEL) ? poseRoom(nb) : null;
+                if (rr !== r.lastRoom && rr !== null && rr === mine) {
+                    var len = M._PortCoopTilesSnapshot(p, 516);
+                    if (len > 4) {
+                        net.sendSignal(+mid, { ts: b64(heap().slice(p, p + len)) });
+                        room.stats.snapsSent++;
+                    }
+                }
+                r.lastRoom = rr;
+            }
+        }
+        function roomSignal(from, d) {
+            if (!roomOk || !room.shareSet) return;
+            var p = M._PortCoopFxBuffer(), b;
+            try {
+                if (typeof d.tb === 'string') {
+                    b = unb64(d.tb);
+                    if (b.length % 5 || b.length > 320) return;
+                    heap().set(b, p);
+                    room.stats.tilesRecv += b.length / 5;
+                    room.stats.tilesApplied += M._PortCoopTilesApply(p, b.length);
+                } else if (typeof d.bh === 'string') {
+                    b = unb64(d.bh);
+                    if (b.length % 4 || b.length > 32) return;
+                    heap().set(b, p);
+                    M._PortCoopButtonsApply(p, b.length);
+                } else if (typeof d.ts === 'string') {
+                    b = unb64(d.ts);
+                    if (b.length < 4 || b.length > 516) return;
+                    heap().set(b, p);
+                    M._PortCoopTilesSetSnapshot(p, b.length);
+                    room.stats.snapsRecv++;
+                }
+            } catch (e) { return; }
+            if (Array.isArray(d.sp) && d.sp.length >= 7 && remotes[from]) {
+                var v = d.sp.map(function (x) { return x | 0; }), r = remotes[from];
+                if (srcOf(r) < 0) return;
+                var who = (v[6] >> 4) & 3, slot = slotOfKey(who === 0 ? +from : cpuKey(from, who));
+                room.stats.starsRecv++;
+                room.stats.starsMade += M._PortCoopStarSpawn(r.src, v[0] & 255, v[1], v[2], v[3], v[4], v[5], v[6] & 15, slot || 0);
+            }
+            if (Array.isArray(d.tk) && d.tk.length >= 2) {
+                var ow = d.tk[0] | 0, id = d.tk[1] & 255;
+                room.stats.takenRecv++;
+                if (ow === net.mid) M._PortCoopStarTaken(255, id);
+                else if (remotes[ow] && remotes[ow].src >= 0) M._PortCoopStarTaken(remotes[ow].src, id);
+            }
         }
 
         /* The local player used the phone: the game that runs the helpers
@@ -763,6 +864,13 @@
             applyFx();
         }
 
+        /* The engine's source number for a remote player (ghosts, stars). */
+        function srcOf(r) {
+            if (r.src < 0)
+                for (var q = 0; q < FX_SOURCES; q++) if (!fx.srcUsed[q]) { fx.srcUsed[q] = true; r.src = q; break; }
+            return r.src;
+        }
+
         /* Each sender's spawned objects, at the frame its pose is being played
          * at, with its Kirby palettes moved to the slots showing those Kirbys. */
         function applyFx() {
@@ -770,10 +878,7 @@
             var fp = M._PortCoopFxBuffer();
             for (var mid in remotes) {
                 var r = remotes[mid], fr = null;
-                if (r.src < 0) {
-                    for (var q = 0; q < FX_SOURCES; q++) if (!fx.srcUsed[q]) { fx.srcUsed[q] = true; r.src = q; break; }
-                    if (r.src < 0) continue;
-                }
+                if (srcOf(r) < 0) continue;
                 if (r.fxResets !== r.jb.resets) { r.fx = []; r.fxResets = r.jb.resets; }
                 var c = r.jb.cursor;
                 if (!r.fx.length || c === null || !r.out || r.out.state !== 'pose') continue;
@@ -994,6 +1099,8 @@
                 if (fxOk) {
                     var want = fx.on && net.state === 'open' && others().length > 0;
                     if (fx.shareSet !== want) { M._PortCoopFxShare(want ? 1 : 0); fx.shareSet = want; }
+                    var wantRoom = roomOk && room.on && want;
+                    if (roomOk && room.shareSet !== wantRoom) { M._PortCoopRoomShare(wantRoom ? 1 : 0); room.shareSet = wantRoom; }
                 }
                 assign();
                 callTick();
@@ -1001,6 +1108,7 @@
                 apply(t);
                 enemyTick(t);
                 worldTick();
+                roomTick();
             },
             /* the tab is hidden (coop.js): tell the others once, then send
              * nothing; on return start every remote stream over (latest only) */
@@ -1024,6 +1132,8 @@
                 enemy.shareSet = null;
                 if (fxOk && fx.shareSet) M._PortCoopFxShare(0);
                 fx.shareSet = null;
+                if (roomOk && room.shareSet) M._PortCoopRoomShare(0);
+                room.shareSet = null;
                 if (typeof M._PortCoopSetLocalColor === 'function') M._PortCoopSetLocalColor(-1);
                 myColor = null;
                 world.shareSet = null;
@@ -1043,6 +1153,11 @@
                 var cs = {};
                 for (var k in cpus) cs[k] = cpus[k].slot;
                 return { auth: cpu.auth, me: net.mid, slots: slots.slice(), on: cpu.on && fxOk, cpus: cs };
+            },
+            roomStats: function () {
+                var e = [];
+                if (roomOk && typeof M._PortCoopRoomStat === 'function') for (var i = 0; i < 12; i++) e.push(M._PortCoopRoomStat(i));
+                return { page: room.stats, engine: e };
             },
             fxStats: function () {
                 var e = [];
@@ -1121,7 +1236,7 @@
         create: create, JitterBuffer: JitterBuffer, encodePoseUp: encodePoseUp,
         decodePoseBody: decodePoseBody, poseX: poseX, poseY: poseY, poseRoom: poseRoom,
         poseHidden: poseHidden, lerpPose: lerpPose,
-        WORLD: WORLD, NEWS: NEWS, ENEMY: ENEMY, FX: FX, EnemyBuffer: EnemyBuffer, describeNews: describeNews, b64: b64, unb64: unb64,
+        WORLD: WORLD, NEWS: NEWS, ENEMY: ENEMY, FX: FX, ROOM: ROOM, EnemyBuffer: EnemyBuffer, describeNews: describeNews, b64: b64, unb64: unb64,
     };
 }));
 
