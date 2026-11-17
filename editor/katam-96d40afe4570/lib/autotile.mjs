@@ -640,6 +640,42 @@ export function retile(model, grid, cells, want = new Map(), salt = 0) {
   }
   return [...changed];
 }
+/** A shape (shapeBits' low 8 bits: UL U UR L R DL D DR) with the corners that do not
+ *  touch both their sides cleared: one of the 47 ways a cell can sit among its
+ *  neighbours ("blob" tiles), as far as its own piece can tell. */
+export function blobOf(shape) {
+  const u = shape & 2, l = shape & 8, r = shape & 16, d = shape & 64;
+  let b = shape & 90;
+  if (u && l) b |= shape & 1;
+  if (u && r) b |= shape & 4;
+  if (d && l) b |= shape & 32;
+  if (d && r) b |= shape & 128;
+  return b;
+}
+
+/** The shapes a style has pieces for: blobOf(shape) | slope << 8, from the cells it learned from. */
+export function shapesOf(style) {
+  const out = new Set();
+  for (const k of style.byShape.keys()) out.add(blobOf(k & 255) | ((k >> 8) << 8));
+  return out;
+}
+
+/**
+ * After retile() with grid.src: where the piece of cell i (painted with `style`)
+ * came from.  'own': the style's piece from a cell of the same shape (blobOf, and
+ * the same slope); 'near': the style's own piece from a cell of another shape (the
+ * style has none of this one); 'borrowed': another brush's piece; null: not picked.
+ */
+export function provenance(model, grid, i, style) {
+  const s = grid.src ? grid.src[i] : -1;
+  if (s < 0) return null;
+  const R = model.rooms[s >> SRC_SHIFT], si = s & SRC_MASK;
+  if (R.style[si] !== style) return 'borrowed';
+  const { W: w, H: h, cls } = grid, B = BRUSH_KINDS[style.kind], x = i % w, y = (i / w) | 0;
+  const shape = shapeBits(w, h, x, y, (j) => B.same(cls[j]), B.edge);
+  return blobOf(shape) === blobOf(R.shape[si]) && slopeCode(cls, grid.col || null, i) === R.slope[si] ? 'own' : 'near';
+}
+
 const hasSlopeNear = (R, i) => {
   const x = i % R.W, y = (i / R.W) | 0;
   for (const [dx, dy] of NEAR) { const a = x + dx, b = y + dy; if (a >= 0 && b >= 0 && a < R.W && b < R.H && R.slope[b * R.W + a]) return true; }

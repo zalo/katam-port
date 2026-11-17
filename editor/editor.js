@@ -152,7 +152,7 @@ const S = {
   undo: [], redo: [], hover: null, drag: null, pick: null, lastRoom: null,
   findings: { errors: [], warnings: [], tips: [] },
   starts: lsGet('katam.ed.starts', {}),
-  dicts: new Map(), colClass: [], colRep: {}, objInfo: new Map(), looks: null, sprites: new Map(), browseArea: null,
+  dicts: new Map(), testMarks: new Map(), colClass: [], colRep: {}, objInfo: new Map(), looks: null, sprites: new Map(), browseArea: null,
 };
 window.katamEditor = S;   // for the console and the tests
 
@@ -176,7 +176,7 @@ const curtain = (msg, { pick = false, err = false } = {}) => {
 };
 
 async function loadLibrary() {
-  const names = ['io', 'png', 'zlib', 'rom', 'vocab', 'registry', 'pipeline', 'project', 'validate', 'native', 'rompack', 'room', 'gfx', 'grid', 'tiles', 'json', 'autotile', 'sprites'];
+  const names = ['io', 'png', 'zlib', 'rom', 'vocab', 'registry', 'pipeline', 'project', 'validate', 'native', 'rompack', 'room', 'gfx', 'grid', 'tiles', 'json', 'autotile', 'brushtest', 'sprites'];
   const mods = await Promise.all(names.map((n) => import(new URL(CFG.lib + n + '.mjs', BASE).href)));
   const L = Object.fromEntries(names.map((n, i) => [n, mods[i]]));
   L.png.setZlib({ deflate: L.zlib.deflate, inflate: L.zlib.inflate });
@@ -674,6 +674,11 @@ function render() {
     }
     void vb; void vc;
   }
+  const marks = S.testMarks.get(R.id);   // a brush's test level: where it has no piece of that shape
+  if (marks) for (const [i, h] of marks) {
+    c.strokeStyle = h === 'borrowed' ? '#ff2d2d' : '#ffd400'; c.lineWidth = 1;
+    c.strokeRect((i % R.W) * 16 + 0.5, ((i / R.W) | 0) * 16 + 0.5, 15, 15);
+  }
   if (S.show.grid) {
     c.lineWidth = 1 / k; c.strokeStyle = 'rgba(255,255,255,.2)';
     c.beginPath();
@@ -832,7 +837,8 @@ function retile(cells, want) {
   }
   if (!R.src || R.src.length !== R.W * R.H) R.src = new Int32Array(R.W * R.H).fill(-1);   // which cell of the original each cell was copied from
   const changed = S.L.autotile.retile(D.model, { W: R.W, H: R.H, art: R.art, cls: R.col.map((v) => S.colClass[v]), col: R.col, src: R.src }, [...set], want || new Map(), S.salt);
-  for (const i of changed) drawCell(i);
+  const marks = S.testMarks.get(R.id);
+  for (const i of changed) { drawCell(i); if (marks) marks.delete(i); }
 }
 const kindValue = (kind) => (S.colRep[kind] !== undefined ? S.colRep[kind] : 13);
 /** Put the current paint (or the eraser, or the collision brush) on a list of cells. */
@@ -1345,15 +1351,18 @@ function newRoomDialog() {
   } }]);
   name.select();
 }
-function createRoom(name, W, H, lk) {
-  flush();
-  // New rooms are numbered in the order of their ids (983 and up), so a new id
-  // must sort after the project's others or every later room would renumber.
+/** The id for a new room of the project.  New rooms are numbered in the order of their ids (983 and
+ *  up), so a new id must sort after the project's others or every later room would renumber. */
+function newRoomId(name) {
   const ns = namespace(), own = roomIds().filter((r) => !roomDoc(r).bind).map((r) => r.split('/').pop());
   const pre = own.some((n) => !/^r\d{3}_/.test(n) && n > 'r') ? 'z' : 'r';
   let k = 1;
   for (const n of own) { const m = new RegExp('^' + pre + '(\\d{3})_').exec(n); if (m) k = Math.max(k, Number(m[1]) + 1); }
-  const id = `room:${ns}/${pre}${String(k).padStart(3, '0')}_${slug(name)}`;
+  return `room:${ns}/${pre}${String(k).padStart(3, '0')}_${slug(name)}`;
+}
+function createRoom(name, W, H, lk) {
+  flush();
+  const id = newRoomId(name);
   const D = dict(lk.tileset), A = S.L.autotile, G = S.L.grid;
   const art = new Array(W * H).fill(D.empty), col = new Array(W * H).fill(0), cells = [], want = new Map();
   const st = D.styles.find((x) => x.kind === 'solid');
@@ -1370,6 +1379,37 @@ function createRoom(name, W, H, lk) {
   S.io.writeText(projPath(id), S.L.json.writeJson(doc));
   rebind(); openRoom(id); validateSoon();
   toast(`Room ${numOf(id)} created. Paint with the terrain brush, then place a door to connect it.`, 5000);
+}
+
+/**
+ * The topology test level for a brush (lib/brushtest.mjs): a new room in the current room's look with
+ * every shape the brush's kind can meet -- for ground, the 47 ways a cell sits among its neighbours and
+ * the slope joins -- painted with the brush.  Cells where the brush has no piece of that shape are
+ * marked until repainted: yellow, its own piece of the nearest shape; red, another brush's piece.
+ */
+function createTestRoom(st) {
+  const look = S.room.doc, D = dict(look.tileset), G = S.L.grid;
+  const base = D.styles.find((x) => x.kind === 'solid');
+  const T = S.L.brushtest.paintTest(D.model, st, { colOf: (k) => (k === 'air' ? 0 : kindValue(k)), classOf: (v) => S.colClass[v], base: base === st ? null : base, salt: S.salt });
+  if (!T) { toast('There is no test level for this kind of brush.'); return; }
+  flush();
+  const id = newRoomId('Test ' + st.name);
+  const doc = {
+    format: 'katam-room/1', id, name: `Test: ${st.name}`, size: { width: T.W, height: T.H }, music: look.music, tileset: look.tileset, palette: look.palette, background: look.background,
+    art: G.encodeGrid(T.art, T.W, T.H, { suggest: (m) => (m === D.empty ? '.' : null) }),
+    collision: G.encodeGrid(T.col, T.W, T.H, { suggest: (v) => S.ctx.collisionGlyph(v), toLegend: (v) => S.ctx.collisionName(v) }),
+    objects: [], doors: [],
+  };
+  ensureProjectFile();
+  S.io.writeText(projPath(id), S.L.json.writeJson(doc));
+  rebind(); openRoom(id); validateSoon();
+  S.room.src = Int32Array.from(T.src);
+  const marks = new Map();
+  T.how.forEach((h, i) => { if (h === 'near' || h === 'borrowed') marks.set(i, h); });
+  S.testMarks.set(id, marks);
+  render();
+  const r = T.report, slopes = st.kind === 'solid' ? ` and ${r.slopes.own} of ${r.slopes.level} slopes` : '';
+  toast(`Test level for “${st.name}”: its own pieces for ${r.shapes.own} of the ${r.shapes.level} shapes${slopes}. Yellow: ${r.cells.near} cells use its nearest shape; red: ${r.cells.borrowed} take another brush’s piece.`, 9000);
 }
 
 /** Bring a room of the original game into the project: as itself (it replaces the original) or as a new room. */
@@ -1492,7 +1532,8 @@ function refreshTab() {
         h('span', { class: 'dim' }, `Edges, corners and fill are copied from how the original rooms build this material (${st.tokens.size} pieces).`),
         st.kind === 'solid' ? h('div', { class: 'row', style: 'display:flex;gap:4px;flex-wrap:wrap' }, [{ value: undefined, label: 'Flat' }].concat(S.L.autotile.SLOPES).map((sl) =>
           h('button', { class: 'btn tiny' + (S.paint.slope === sl.value ? ' on' : ''), title: sl.value === undefined ? 'Paint solid ground' : `Paint ground with this slope (${sl.label})`, onclick: () => { S.paint = { style: st, slope: sl.value }; refreshTab(); } }, sl.label))) : null,
-        h('div', { class: 'row', style: 'display:flex;gap:6px' }, h('button', { class: 'btn tiny', title: 'Pick a different random fill for the whole room', onclick: shuffleFill }, '🎲 Shuffle the fill')));
+        h('div', { class: 'row', style: 'display:flex;gap:6px' }, h('button', { class: 'btn tiny', title: 'Pick a different random fill for the whole room', onclick: shuffleFill }, '🎲 Shuffle the fill'),
+          S.L.brushtest.LEVELS[st.kind] ? h('button', { class: 'btn tiny', title: 'A new room with every shape this brush can meet (for ground: the 47 ways a cell sits among its neighbours, and the slope joins), painted with it. Yellow marks: it has no piece of that shape and uses its nearest; red: another brush’s piece.', onclick: () => createTestRoom(st) }, '🧪 Test level') : null));
     } else if (S.paint && S.paint.mech) {
       const m = S.paint.mech;
       info = h('div', { class: 'tileinfo' }, mechSwatch(D, m).firstChild, h('b', null, m.label), h('span', { class: 'dim' }, m.tip),
