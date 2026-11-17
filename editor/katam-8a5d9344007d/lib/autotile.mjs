@@ -40,7 +40,8 @@
 //   - ties are broken by a seeded draw, so repainting does not reshuffle.
 //
 // Optional hand-checked knowledge per tile set (assets/schema/authoring/
-// autotile/*.json, see RULES below) names, orders and prunes the styles; the
+// autotile/*.json, see RULES below) names, orders and prunes the styles, and
+// lists pieces ("exclude") that belong to no brush, as ground or as edge art; the
 // learned styles are the fallback for every tile set without it.
 //
 // Browser-safe, no dependencies.  The editor (web/editor/) is the user.
@@ -149,11 +150,20 @@ function slopeCost(a, b) {
 /**
  * Optional hand-checked knowledge for a tile set (one JSON file per tile set):
  *   { "tileset": "tileset:vanilla/0",
- *     "styles": [ { "kind": "solid", "piece": "<a body piece token>", "name": "Grass on cobble" }, ... ],
- *     "only": true }
+ *     "styles": [ { "kind": "solid", "piece": "<a body piece token>", "name": "Grass on cobble",
+ *                   "exclude": ["<token>", ...], "borrow": false }, ... ],
+ *     "only": true,
+ *     "exclude": ["<token>", ...] }
  * Each listed style is the learned style that holds that piece; listed styles
  * come first, in the order given, with the name given; with "only", unlisted
  * styles of a listed kind are dropped (other kinds keep what was learned).
+ * The top-level "exclude" takes pieces out of every brush, ground and edge art
+ * (a steel block among clouds); a style's own "exclude" takes them out of that
+ * brush only, for pieces another brush rightly owns (the log ends a lumber
+ * yard's soil lies against belong to its log brush, not to the soil).
+ * A brush lacking a shape (a wall, an underside) borrows that shape's pieces
+ * from the other brushes of its kind; "borrow": false keeps it to its own
+ * nearest shapes instead (dirt cut square rather than framed in logs).
  */
 
 /**
@@ -165,7 +175,10 @@ function slopeCost(a, b) {
  */
 export function learn(rooms, empty, { opaque = () => false, pixels = null, rules = null } = {}) {
   // the blank and flat-black pieces the original leaves where the camera never looks
-  const hidden = (t) => t === empty || /^(...[.hvx]f ?){4}$/.test(t);
+  // `rules.exclude`: pieces of this tile set that are no part of any brush, ground or edge art
+  // (steel blocks and pillars among clouds; the foot of a tree trunk standing on a lumber yard's grass)
+  const exclude = new Set(rules && Array.isArray(rules.exclude) ? rules.exclude : []);
+  const hidden = (t) => t === empty || exclude.has(t) || /^(...[.hvx]f ?){4}$/.test(t);
   const model = { empty, rooms: [], kinds: {}, styleOf: new Map(), rim: new Set() };
   const kindCount = new Map(), airUse = new Map();
   for (const kind of Object.keys(BRUSH_KINDS)) model.kinds[kind] = { styles: [] };
@@ -187,7 +200,7 @@ export function learn(rooms, empty, { opaque = () => false, pixels = null, rules
     }
     // air pieces and how often they sit against terrain: the art a ground needs beside it
     for (let i = 0; i < w * h; i++) {
-      if (cls[i] !== 'air' || art[i] === empty) continue;
+      if (cls[i] !== 'air' || art[i] === empty || exclude.has(art[i])) continue;   // an excluded piece is no edge art either
       const x = i % w, y = (i / w) | 0;
       let near = 0;
       for (const [dx, dy] of NEAR) { const a = x + dx, b = y + dy; if (a >= 0 && b >= 0 && a < w && b < h && terrain(cls[b * w + a])) { near = 1; break; } }
@@ -216,6 +229,8 @@ export function learn(rooms, empty, { opaque = () => false, pixels = null, rules
           || K.styles.find((st) => !picked.includes(st) && st.tokens.has(r.piece));
         if (!s) continue;
         if (r.name) s.title = r.name;
+        if (Array.isArray(r.exclude) && r.exclude.length) dropPieces(model, s, new Set(r.exclude));
+        if (r.borrow === false) s.noBorrow = true;
         picked.push(s);
       }
       K.styles = rules.only ? picked : picked.concat(K.styles.filter((s) => !picked.includes(s)));
@@ -263,6 +278,21 @@ export function learn(rooms, empty, { opaque = () => false, pixels = null, rules
   }
   model.seam = seamCost(pixels);
   return model;
+}
+
+/** A style's own `exclude`: the cells that hold those pieces stop being its sources (no other brush gains them),
+ *  and the brush draws none of them as edge art. */
+function dropPieces(model, s, drop) {
+  const keep = (id) => !drop.has(model.rooms[id >> SRC_SHIFT].art[id & SRC_MASK]);
+  for (const id of s.cells) {
+    if (keep(id)) continue;
+    const R = model.rooms[id >> SRC_SHIFT], i = id & SRC_MASK;
+    if (R.style[i] === s) R.style[i] = null;   // still a known neighbour for joins (pairH/pairV), just no source
+  }
+  s.cells = s.cells.filter(keep);
+  for (const [key, list] of [...s.byShape]) { const l = list.filter(keep); if (l.length) s.byShape.set(key, l); else s.byShape.delete(key); }
+  for (const t of drop) s.tokens.delete(t);
+  s.drop = drop;   // and retile() puts none of them in the air beside this brush's ground
 }
 
 const isBodyCell = (R, i) => R.ok[i] && !R.slope[i] && (R.shape[i] & 0x5a) === 0x5a;   // NEAR 1,3,4,6: the four sides
@@ -458,7 +488,7 @@ function candidates(model, style, key) {
       if (list.length >= MAX_TRY && dist(k) > dist(keys[0])) break;
       list.push(...style.byShape.get(k));
     }
-    if ((!exact || exact.length < 8) && style.tokens.size > 2 && (!keys.length || dist(keys[0]) >= 3)) {      // a block is stacked whole: it borrows nothing; nor does a style with a near miss of its own
+    if ((!exact || exact.length < 8) && style.tokens.size > 2 && !style.noBorrow && (!keys.length || dist(keys[0]) >= 3)) {      // a block is stacked whole: it borrows nothing; nor does a style with a near miss of its own
       const more = [];
       for (const other of model.kinds[style.kind].styles) if (other !== style && other.tokens.size > 2 && other.byShape.has(key)) more.push(...other.byShape.get(key));
       const step = Math.max(1, Math.floor(more.length / MAX_TRY));
@@ -547,7 +577,7 @@ export function retile(model, grid, cells, want = new Map(), salt = 0) {
         const R = model.rooms[s >> SRC_SHIFT], si = s & SRC_MASK, sx = si % R.W - dx, sy = ((si / R.W) | 0) - dy;
         if (sx < 0 || sy < 0 || sx >= R.W || sy >= R.H) continue;
         const cc = sy * R.W + sx;
-        if (R.ok[cc] && R.style[cc] && (R.style[cc] === c.style || (R.style[cc].kind === c.style.kind && c.style.tokens.size > 2 && R.style[cc].tokens.size > 2))) cand.add((s & ~SRC_MASK) | cc);
+        if (R.ok[cc] && R.style[cc] && (R.style[cc] === c.style || (!c.style.noBorrow && R.style[cc].kind === c.style.kind && c.style.tokens.size > 2 && R.style[cc].tokens.size > 2))) cand.add((s & ~SRC_MASK) | cc);
       }
       let best = -1, bestScore = 1e9;
       for (const id of cand) {
@@ -599,8 +629,8 @@ export function retile(model, grid, cells, want = new Map(), salt = 0) {
       const R = model.rooms[s >> SRC_SHIFT], si = s & SRC_MASK, sx = si % R.W - NEAR[k][0], sy = ((si / R.W) | 0) - NEAR[k][1];
       if (sx < 0 || sy < 0 || sx >= R.W || sy >= R.H || R.cls[sy * R.W + sx] !== 'air') continue;
       if (around(R.W, R.H, R.cls, sx, sy) !== here) continue;      // the original's cell sits against other terrain too: its art is about that
-      const t = R.art[sy * R.W + sx];
-      bump(votes, model.rim.has(t) ? t : model.empty, !SIDE[k] ? 1 : NEAR[k][1] === 1 ? 4 : 3);
+      const t = R.art[sy * R.W + sx], st = styleAt(b * w + a);   // the brush painted there: its own exclude covers the edge art it brings along
+      bump(votes, model.rim.has(t) && !(st && st.drop && st.drop.has(t)) ? t : model.empty, !SIDE[k] ? 1 : NEAR[k][1] === 1 ? 4 : 3);
     }
     if (!near) { set(j, model.empty); continue; }
     if (!known || !votes.size) continue;        // terrain the brush did not place: leave its edges alone
