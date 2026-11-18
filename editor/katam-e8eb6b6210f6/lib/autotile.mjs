@@ -151,7 +151,7 @@ function slopeCost(a, b) {
  * Optional hand-checked knowledge for a tile set (one JSON file per tile set):
  *   { "tileset": "tileset:vanilla/0",
  *     "styles": [ { "kind": "solid", "piece": "<a body piece token>", "name": "Grass on cobble",
- *                   "exclude": ["<token>", ...], "borrow": false }, ... ],
+ *                   "exclude": ["<token>", ...], "take": ["<token>", ...], "borrow": false }, ... ],
  *     "only": true,
  *     "exclude": ["<token>", ...] }
  * Each listed style is the learned style that holds that piece; listed styles
@@ -161,6 +161,9 @@ function slopeCost(a, b) {
  * (a steel block among clouds); a style's own "exclude" takes them out of that
  * brush only, for pieces another brush rightly owns (the log ends a lumber
  * yard's soil lies against belong to its log brush, not to the soil).
+ * "take" moves pieces into the brush from the other brushes of its kind, for
+ * pieces of its material learned apart (the undersides of clouds); a brush
+ * left with no pieces is dropped.
  * A brush lacking a shape (a wall, an underside) borrows that shape's pieces
  * from the other brushes of its kind; "borrow": false keeps it to its own
  * nearest shapes instead (dirt cut square rather than framed in logs).
@@ -229,11 +232,12 @@ export function learn(rooms, empty, { opaque = () => false, pixels = null, rules
           || K.styles.find((st) => !picked.includes(st) && st.tokens.has(r.piece));
         if (!s) continue;
         if (r.name) s.title = r.name;
+        if (Array.isArray(r.take) && r.take.length) takePieces(model, s, new Set(r.take));
         if (Array.isArray(r.exclude) && r.exclude.length) dropPieces(model, s, new Set(r.exclude));
         if (r.borrow === false) s.noBorrow = true;
         picked.push(s);
       }
-      K.styles = rules.only ? picked : picked.concat(K.styles.filter((s) => !picked.includes(s)));
+      K.styles = (rules.only ? picked : picked.concat(K.styles.filter((s) => !picked.includes(s)))).filter((s) => s.cells.length);
     }
     K.styles = K.styles.slice(0, 6);
     // how usual each piece is for its shape, within the style: the original's one-off
@@ -293,6 +297,28 @@ function dropPieces(model, s, drop) {
   for (const [key, list] of [...s.byShape]) { const l = list.filter(keep); if (l.length) s.byShape.set(key, l); else s.byShape.delete(key); }
   for (const t of drop) s.tokens.delete(t);
   s.drop = drop;   // and retile() puts none of them in the air beside this brush's ground
+}
+
+/** A style's "take": every cell of the kind that holds one of those pieces moves to this style
+ *  from whichever style learned it (including styles too small to be offered). */
+function takePieces(model, s, take) {
+  const moved = new Map();   // old style -> Set of its cells that move
+  model.rooms.forEach((R, r) => {
+    for (let i = 0; i < R.art.length; i++) {
+      const o = R.style[i];
+      if (!o || o === s || o.kind !== s.kind || !take.has(R.art[i])) continue;
+      const id = (r << SRC_SHIFT) | i, key = shapeKey(R.shape[i], R.slope[i]);
+      if (!moved.has(o)) moved.set(o, new Set());
+      moved.get(o).add(id);
+      R.style[i] = s; s.cells.push(id); s.tokens.add(R.art[i]);
+      let l = s.byShape.get(key); if (!l) s.byShape.set(key, l = []); l.push(id);
+    }
+  });
+  for (const [o, ids] of moved) {
+    o.cells = o.cells.filter((id) => !ids.has(id));
+    for (const [key, list] of [...o.byShape]) { const l = list.filter((id) => !ids.has(id)); if (l.length) o.byShape.set(key, l); else o.byShape.delete(key); }
+    o.tokens = new Set(o.cells.map((id) => model.rooms[id >> SRC_SHIFT].art[id & SRC_MASK]));
+  }
 }
 
 const isBodyCell = (R, i) => R.ok[i] && !R.slope[i] && (R.shape[i] & 0x5a) === 0x5a;   // NEAR 1,3,4,6: the four sides
@@ -467,7 +493,7 @@ function rnd(x, y, salt) {
   return (h >>> 0) / 4294967296;
 }
 
-const W_FOREIGN = 5, W_WALL = 2.5, W_NEAR = 6, W_FAR = 1, W_DEPTH = 1.5, W_ODD = 3, P_KNOWN = 1, P_CORNER = 1.2, P_SEAM = 7, MAX_TRY = 64, PASSES = 4;
+const W_FOREIGN = 5, W_WALL = 2.5, W_NEAR = 6, W_SPUR = 24, W_FAR = 1, W_DEPTH = 1.5, W_ODD = 3, P_KNOWN = 1, P_CORNER = 1.2, P_SEAM = 7, MAX_TRY = 64, PASSES = 4;
 
 /**
  * Candidate sources for a shape: the style's cells of that shape, else of the
@@ -478,7 +504,9 @@ const W_FOREIGN = 5, W_WALL = 2.5, W_NEAR = 6, W_FAR = 1, W_DEPTH = 1.5, W_ODD =
 function candidates(model, style, key) {
   let list = style.near.get(key);
   if (list) return list;
-  const dist = (k) => ((k >> 8) !== (key >> 8) ? 1000 : 0) + 3 * popcount((k ^ key) & 0x5a) + popcount((k ^ key) & 0xa5);
+  // a side the source is open on where the cell is joined draws an edge inside the ground
+  // (grass under a ledge); a side it is joined on where the cell is open only looks cut square
+  const dist = (k) => ((k >> 8) !== (key >> 8) ? 1000 : 0) + 3 * popcount((k ^ key) & 0x5a) + popcount((k ^ key) & 0xa5) + 6 * popcount(key & ~k & 0x5a);
   const exact = style.byShape.get(key);
   if (exact && exact.length >= MAX_TRY / 2) list = exact;
   else {
@@ -537,7 +565,7 @@ export function retile(model, grid, cells, want = new Map(), salt = 0) {
     if (u !== undefined) return u;
     const R = model.rooms[id >> SRC_SHIFT], si = id & SRC_MASK, d = R.shape[si] ^ c.shape;
     const usual = (c.style.usual.get(shapeKey(R.shape[si], R.slope[si])) || new Map()).get(R.art[si]) || 0;
-    u = W_NEAR * popcount(d & 255) + W_FAR * popcount(d >>> 8) + W_DEPTH * depthDiff(R.depth[si], c.depth) + W_ODD * (1 - Math.sqrt(usual)) + rnd(c.x * 31 + (id & 1023), c.y * 17 + (id >> 10), salt) * 0.6;
+    u = W_NEAR * popcount(d & 255) + W_SPUR * popcount(c.shape & ~R.shape[si] & 0x5a) + W_FAR * popcount(d >>> 8) + W_DEPTH * depthDiff(R.depth[si], c.depth) + W_ODD * (1 - Math.sqrt(usual)) + rnd(c.x * 31 + (id & 1023), c.y * 17 + (id >> 10), salt) * 0.6;
     if (R.style[si] !== c.style) u += W_FOREIGN;
     // a source drawn against a back wall (an opaque piece in the air beside it) leans on art the brush will not put there
     const sx = si % R.W, sy = (si / R.W) | 0;
